@@ -308,7 +308,7 @@ def load_model(run_name: str, paths: ResultsPaths, device: torch.device) -> GPT:
     size = MODEL_SIZES_BY_NAME[result.model_size]
     model = GPT(GPTConfig.from_model_size(size, result.positional_scheme))
     checkpoint_path = paths.run_directory(run_name) / CHECKPOINT_FILENAME
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
     return model.to(device).eval()
 
 

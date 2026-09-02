@@ -162,7 +162,6 @@ class TrainingConfig:
     eval_interval_steps: int = 200
     # Batches of validation data used for the periodic (cheap) evaluation.
     eval_batches_periodic: int = 20
-    seed: int = 0
     use_mixed_precision: bool = True
     compile_model: bool = False
     log_interval_steps: int = 50

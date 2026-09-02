@@ -11,6 +11,7 @@ import argparse
 import json
 import logging
 from collections.abc import Sequence
+from dataclasses import asdict
 
 from scaling_lm.config import (
     DEFAULT_POSITIONAL_SCHEME,
@@ -35,10 +36,18 @@ SWEEP_SEED = 0
 
 
 def train_or_load(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
-    if result_exists(run_config.run_name, paths):
-        logger.info("%s already finished, loading result", run_config.run_name)
-        return load_result(run_config.run_name, paths)
-    return train_run(run_config, paths)
+    """Reuse a finished run with the same name, refusing one trained under a different config."""
+    if not result_exists(run_config.run_name, paths):
+        return train_run(run_config, paths)
+    result = load_result(run_config.run_name, paths)
+    requested = asdict(run_config.training)
+    if result.training != requested:
+        raise RuntimeError(
+            f"{run_config.run_name} exists but was trained with {result.training}, "
+            f"not the requested {requested}; delete it or use another --results-dir"
+        )
+    logger.info("%s already finished, loading result", run_config.run_name)
+    return result
 
 
 def summarise_run(result: RunResult) -> dict[str, object]:
