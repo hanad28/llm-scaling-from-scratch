@@ -1,0 +1,212 @@
+"""Project-wide constants: paths, dataset source, model sizes and training hyperparameters.
+
+Everything tunable lives here so that the experiment scripts contain no magic numbers.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATA_DIR = PROJECT_ROOT / "data"
+RAW_DIR = DATA_DIR / "raw"
+CORPUS_DIR = DATA_DIR / "corpus"
+TOKENS_DIR = DATA_DIR / "tokens"
+TOKENIZER_PATH = DATA_DIR / "tokenizer.json"
+CORPUS_STATS_PATH = DATA_DIR / "corpus_stats.json"
+RESULTS_DIR = PROJECT_ROOT / "results"
+
+SPLIT_NAMES = ("train", "validation", "test")
+
+
+@dataclass(frozen=True)
+class ResultsPaths:
+    """Layout of one results directory (the main sweep and the CPU pilot use separate roots)."""
+
+    root: Path = RESULTS_DIR
+
+    @property
+    def runs(self) -> Path:
+        return self.root / "runs"
+
+    @property
+    def figures(self) -> Path:
+        return self.root / "figures"
+
+    @property
+    def sweep_summary(self) -> Path:
+        return self.root / "scaling_sweep.json"
+
+    @property
+    def ablation_summary(self) -> Path:
+        return self.root / "positional_ablation.json"
+
+    @property
+    def scaling_fit(self) -> Path:
+        return self.root / "scaling_fit.json"
+
+    @property
+    def generations(self) -> Path:
+        return self.root / "generations.json"
+
+    @property
+    def summary_markdown(self) -> Path:
+        return self.root / "summary.md"
+
+    def run_directory(self, run_name: str) -> Path:
+        return self.runs / run_name
+
+
+# ---------------------------------------------------------------------------
+# Dataset source
+# ---------------------------------------------------------------------------
+# Weekly mirror of the Cornell arXiv metadata snapshot. The revision is pinned
+# so the corpus can be rebuilt byte-for-byte later.
+HF_DATASET_REPO = "librarian-bots/arxiv-metadata-snapshot"
+HF_DATASET_REVISION = "47141d6fd17f52b65424d246665334914cac3011"
+HF_PARQUET_SHARD_PATTERN = "data/train-{index:05d}-of-00010.parquet"
+HF_PARQUET_SHARD_COUNT = 10
+PARQUET_COLUMNS = ("id", "title", "categories", "abstract")
+
+TARGET_CATEGORIES = frozenset({"cs.AI", "cs.LG", "cs.CL"})
+
+# Abstracts shorter than this (in characters) are usually withdrawal notices or
+# placeholders rather than real abstracts.
+MIN_ABSTRACT_CHARS = 200
+
+# Fractions of documents per split. Assignment is by hashing the arXiv id, so
+# it is deterministic and independent of document order.
+SPLIT_FRACTIONS = {"train": 0.98, "validation": 0.01, "test": 0.01}
+SPLIT_HASH_BUCKETS = 10_000
+
+# ---------------------------------------------------------------------------
+# Tokenizer
+# ---------------------------------------------------------------------------
+VOCAB_SIZE = 8192
+EOS_TOKEN = "<|endoftext|>"
+# Byte-level BPE with 8192 merges comfortably fits in uint16 storage.
+TOKEN_DTYPE = "uint16"
+TOKENIZER_TRAINING_DOCS = 200_000
+
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
+CONTEXT_LENGTH = 256
+HEAD_DIM = 64
+MLP_EXPANSION = 4
+POSITIONAL_SCHEMES = ("learned", "sinusoidal", "rope")
+DEFAULT_POSITIONAL_SCHEME = "learned"
+
+
+@dataclass(frozen=True)
+class ModelSize:
+    """Architecture hyperparameters for one point on the size sweep."""
+
+    name: str
+    n_layer: int
+    d_model: int
+
+    @property
+    def n_head(self) -> int:
+        return self.d_model // HEAD_DIM
+
+    @property
+    def approx_non_embedding_params(self) -> int:
+        """Kaplan et al.'s 12 * n_layer * d_model^2 estimate (attention + MLP weights)."""
+        return 12 * self.n_layer * self.d_model**2
+
+
+# Head dimension is fixed at 64 and the MLP ratio at 4, so width and depth are
+# the only things that change. d_model / n_layer stays in the 32 to 64 band.
+MODEL_SIZES: tuple[ModelSize, ...] = (
+    ModelSize(name="tiny", n_layer=4, d_model=128),
+    ModelSize(name="small", n_layer=6, d_model=256),
+    ModelSize(name="medium", n_layer=7, d_model=384),
+    ModelSize(name="large", n_layer=8, d_model=512),
+    ModelSize(name="xlarge", n_layer=14, d_model=768),
+)
+MODEL_SIZES_BY_NAME = {size.name: size for size in MODEL_SIZES}
+
+# The ablation runs at a single mid-sized point on the sweep.
+ABLATION_MODEL_SIZE = "medium"
+ABLATION_POSITIONAL_SCHEMES = ("learned", "rope")
+ABLATION_SEEDS = (0, 1, 2)
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+# Kaplan et al. (2020, appendix D.6) fitted lr(N) = 0.003239 - 0.0001395 ln(N)
+# for non-embedding parameter count N. The rule is used as-is for every size.
+KAPLAN_LR_INTERCEPT = 0.003239
+KAPLAN_LR_SLOPE = -0.0001395
+
+# Cosine decay finishes at this fraction of the peak learning rate.
+FINAL_LR_FRACTION = 0.1
+WARMUP_FRACTION = 0.05
+
+
+@dataclass(frozen=True)
+class TrainingConfig:
+    """Optimiser and schedule settings shared by every run in the sweep."""
+
+    batch_size_sequences: int = 128
+    gradient_accumulation_steps: int = 1
+    weight_decay: float = 0.1
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.95
+    grad_clip_norm: float = 1.0
+    eval_interval_steps: int = 200
+    # Batches of validation data used for the periodic (cheap) evaluation.
+    eval_batches_periodic: int = 20
+    seed: int = 0
+    use_mixed_precision: bool = True
+    compile_model: bool = False
+    log_interval_steps: int = 50
+    # Set to cap the number of training steps (used for smoke tests only).
+    max_steps: int | None = None
+
+    @property
+    def tokens_per_step(self) -> int:
+        return self.batch_size_sequences * self.gradient_accumulation_steps * CONTEXT_LENGTH
+
+
+DEFAULT_TRAINING_CONFIG = TrainingConfig()
+
+# ---------------------------------------------------------------------------
+# Analysis
+# ---------------------------------------------------------------------------
+# Kaplan et al. (2020) report L(N) = (N_c / N)^alpha_N with alpha_N = 0.076.
+KAPLAN_ALPHA_N = 0.076
+KAPLAN_N_C = 8.8e13
+BOOTSTRAP_RESAMPLES = 10_000
+CONFIDENCE_LEVEL = 0.95
+
+# ---------------------------------------------------------------------------
+# Generation
+# ---------------------------------------------------------------------------
+GENERATION_MAX_NEW_TOKENS = 120
+GENERATION_TEMPERATURE = 0.8
+GENERATION_TOP_K = 40
+GENERATION_PROMPTS: tuple[str, ...] = (
+    "We propose a novel",
+    "Large language models",
+    "In this paper, we study the problem of",
+)
+
+
+@dataclass
+class RunConfig:
+    """Everything needed to reproduce a single training run."""
+
+    model_size: str
+    positional_scheme: str = DEFAULT_POSITIONAL_SCHEME
+    seed: int = 0
+    training: TrainingConfig = field(default_factory=TrainingConfig)
+
+    @property
+    def run_name(self) -> str:
+        return f"{self.model_size}_{self.positional_scheme}_seed{self.seed}"
