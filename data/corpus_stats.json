@@ -1,0 +1,15 @@
+{
+  "dataset_repo": "librarian-bots/arxiv-metadata-snapshot",
+  "dataset_revision": "47141d6fd17f52b65424d246665334914cac3011",
+  "vocab_size": 8192,
+  "documents": {
+    "train": 448573,
+    "validation": 4616,
+    "test": 4549
+  },
+  "tokens": {
+    "train": 118703695,
+    "validation": 1234923,
+    "test": 1207519
+  }
+}
