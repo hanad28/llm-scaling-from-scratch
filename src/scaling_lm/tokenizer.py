@@ -10,6 +10,7 @@ end-of-text token between documents. Token counts are written to data/corpus_sta
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import logging
@@ -36,6 +37,7 @@ from scaling_lm.data import Document, read_split, split_path
 logger = logging.getLogger(__name__)
 
 ENCODE_BATCH_SIZE = 2_000
+FINGERPRINT_CHUNK_BYTES = 1 << 24
 
 
 def train_tokenizer(texts: Iterable[str], vocab_size: int = VOCAB_SIZE) -> Tokenizer:
@@ -92,6 +94,16 @@ def encode_split(tokenizer: Tokenizer, documents: Iterable[Document], output_pat
 
 def load_tokens(split_name: str) -> np.memmap:
     return np.memmap(tokens_path(split_name), dtype=TOKEN_DTYPE, mode="r")
+
+
+def corpus_fingerprint() -> str:
+    """SHA-256 over corpus_stats.json and every split's token file, identifying the exact corpus."""
+    digest = hashlib.sha256(CORPUS_STATS_PATH.read_bytes())
+    for split_name in SPLIT_NAMES:
+        with tokens_path(split_name).open("rb") as handle:
+            for chunk in iter(lambda: handle.read(FINGERPRINT_CHUNK_BYTES), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
 
 
 def training_texts(limit: int) -> Iterator[str]:

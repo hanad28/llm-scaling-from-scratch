@@ -126,10 +126,13 @@ def ablation_section(ablation: Mapping[str, object] | None) -> list[str]:
             f"{comparison['mean_difference']:+.4f} nats per token.",
         ]
     )
-    if "welch_p_value" in comparison:
+    if "paired_p_value" in comparison:
         lines.append(
-            f"Welch t-test: t = {comparison['welch_t_statistic']:.2f}, "
-            f"p = {comparison['welch_p_value']:.3f}."
+            f"Paired t-test on the per-seed differences (runs are matched by seed, so each "
+            f"pair saw the training windows in the same order): "
+            f"t = {comparison['paired_t_statistic']:.2f}, "
+            f"p = {comparison['paired_p_value']:.3f}, "
+            f"std of the differences = {comparison['std_difference']:.4f}."
         )
     return lines
 

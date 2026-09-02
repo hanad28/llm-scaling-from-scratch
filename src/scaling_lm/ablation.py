@@ -25,8 +25,13 @@ from scaling_lm.config import (
     RunConfig,
     TrainingConfig,
 )
-from scaling_lm.sweep import summarise_run, train_or_load
-from scaling_lm.train import RunResult, add_training_arguments, training_config_from_args
+from scaling_lm.sweep import summarise_run
+from scaling_lm.train import (
+    RunResult,
+    add_training_arguments,
+    train_or_load,
+    training_config_from_args,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,19 +64,30 @@ def summarise_scheme(scheme: str, results: Sequence[RunResult]) -> SchemeSummary
 
 
 def compare_schemes(baseline: SchemeSummary, alternative: SchemeSummary) -> dict[str, float | str]:
-    """Mean loss difference (alternative minus baseline) with a Welch t-test when seeds allow."""
-    difference = alternative.mean_validation_loss - baseline.mean_validation_loss
+    """Mean loss difference (alternative minus baseline) with a paired t-test over matched seeds.
+
+    The two schemes are trained with the same seeds, so run k of each visits the
+    training windows in the same order. That makes the design paired: the test is on
+    the per-seed differences, not on two independent samples.
+    """
+    if baseline.seeds != alternative.seeds:
+        raise ValueError(
+            f"schemes must use the same seeds in the same order for a paired comparison, "
+            f"got {baseline.seeds} and {alternative.seeds}"
+        )
+    paired_differences = np.array(alternative.validation_losses) - np.array(
+        baseline.validation_losses
+    )
     comparison: dict[str, float | str] = {
         "baseline": baseline.positional_scheme,
         "alternative": alternative.positional_scheme,
-        "mean_difference": difference,
+        "mean_difference": float(paired_differences.mean()),
     }
-    if len(baseline.validation_losses) > 1 and len(alternative.validation_losses) > 1:
-        test = stats.ttest_ind(
-            alternative.validation_losses, baseline.validation_losses, equal_var=False
-        )
-        comparison["welch_t_statistic"] = float(test.statistic)
-        comparison["welch_p_value"] = float(test.pvalue)
+    if len(paired_differences) > 1:
+        comparison["std_difference"] = float(paired_differences.std(ddof=1))
+        test = stats.ttest_rel(alternative.validation_losses, baseline.validation_losses)
+        comparison["paired_t_statistic"] = float(test.statistic)
+        comparison["paired_p_value"] = float(test.pvalue)
     return comparison
 
 

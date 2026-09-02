@@ -42,6 +42,13 @@ def test_rejects_too_few_points_and_non_positive_values():
         fit_power_law(np.array([1e6, 1e7, 1e8]), np.array([3.0, -2.5, 2.0]))
 
 
+@pytest.mark.parametrize("bad_loss", [float("nan"), float("inf"), -float("inf")])
+def test_rejects_non_finite_losses(bad_loss):
+    losses = np.array([3.0, bad_loss, 2.0, 1.9, 1.8])
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        fit_power_law(PARAMETER_COUNTS, losses)
+
+
 def test_to_dict_is_json_friendly():
     losses = 10.0 * PARAMETER_COUNTS**-0.08
     payload = fit_power_law(PARAMETER_COUNTS, losses, bootstrap_resamples=100).to_dict()

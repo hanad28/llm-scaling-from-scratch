@@ -3,6 +3,9 @@
 Run one configuration directly with:
 
     python -m scaling_lm.train --model-size small [--positional rope] [--seed 1]
+
+A run whose result.json already exists is loaded rather than retrained, provided it was
+trained with the same TrainingConfig on the same corpus (checked by fingerprint).
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from scaling_lm.config import (
 )
 from scaling_lm.dataset import TokenWindows, epoch_batches, sequential_batches
 from scaling_lm.model import GPT, GPTConfig
+from scaling_lm.tokenizer import corpus_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +64,7 @@ class RunResult:
     parameters: dict[str, int]
     architecture: dict[str, int]
     training: dict[str, object]
+    corpus_fingerprint: str
     total_steps: int
     tokens_seen: int
     peak_learning_rate: float
@@ -179,6 +184,7 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
     # torch.compile wraps the module; keep the raw model for parameter counts and saving.
     forward_model: nn.Module = torch.compile(model) if config.compile_model else model
 
+    fingerprint = corpus_fingerprint()
     train_windows = TokenWindows("train")
     validation_windows = TokenWindows("validation")
     test_windows = TokenWindows("test")
@@ -275,6 +281,7 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
             "context_length": CONTEXT_LENGTH,
         },
         training=asdict(config),
+        corpus_fingerprint=fingerprint,
         total_steps=total_steps,
         tokens_seen=total_steps * config.tokens_per_step,
         peak_learning_rate=peak_lr,
@@ -301,6 +308,28 @@ def load_result(run_name: str, paths: ResultsPaths) -> RunResult:
     payload = json.loads((paths.run_directory(run_name) / RESULT_FILENAME).read_text())
     payload["history"] = [EvalPoint(**point) for point in payload["history"]]
     return RunResult(**payload)
+
+
+def train_or_load(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
+    """Reuse a finished run only if its training config and corpus match the request exactly."""
+    if not result_exists(run_config.run_name, paths):
+        return train_run(run_config, paths)
+    result = load_result(run_config.run_name, paths)
+    requested = asdict(run_config.training)
+    if result.training != requested:
+        raise RuntimeError(
+            f"{run_config.run_name} exists but was trained with {result.training}, "
+            f"not the requested {requested}; delete it or use another --results-dir"
+        )
+    current_fingerprint = corpus_fingerprint()
+    if result.corpus_fingerprint != current_fingerprint:
+        raise RuntimeError(
+            f"{run_config.run_name} exists but was trained on corpus "
+            f"{result.corpus_fingerprint[:12]}, not the current {current_fingerprint[:12]}; "
+            "the token files have changed since that run, delete it or use another --results-dir"
+        )
+    logger.info("%s already finished, loading result", run_config.run_name)
+    return result
 
 
 def load_model(run_name: str, paths: ResultsPaths, device: torch.device) -> GPT:
@@ -356,7 +385,7 @@ def main() -> None:
         seed=args.seed,
         training=training_config_from_args(args),
     )
-    train_run(run_config, ResultsPaths(args.results_dir))
+    train_or_load(run_config, ResultsPaths(args.results_dir))
 
 
 if __name__ == "__main__":

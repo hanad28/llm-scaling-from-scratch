@@ -52,6 +52,12 @@ def validate_inputs(parameter_counts: np.ndarray, losses: np.ndarray) -> None:
         raise ValueError("parameter_counts and losses must have the same shape")
     if len(parameter_counts) < MIN_POINTS_FOR_FIT:
         raise ValueError(f"need at least {MIN_POINTS_FOR_FIT} points to fit a power law")
+    if not np.all(np.isfinite(losses)):
+        raise ValueError(
+            f"losses contain NaN or infinite values (a diverged run?): {losses.tolist()}"
+        )
+    if not np.all(np.isfinite(parameter_counts)):
+        raise ValueError(f"parameter counts must be finite: {parameter_counts.tolist()}")
     if np.any(parameter_counts <= 0) or np.any(losses <= 0):
         raise ValueError("parameter counts and losses must be positive for a log-log fit")
 

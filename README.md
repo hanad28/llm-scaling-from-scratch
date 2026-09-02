@@ -134,7 +134,7 @@ With five points and two fitted parameters there are three residual degrees of f
 
 ### Ablation
 
-One controlled comparison at the `medium` size (12.4M non-embedding parameters): learned position embeddings against rotary positional encoding, everything else identical, three seeds each. The seed changes both the initialisation and the order in which training windows are visited. The report gives per-seed losses, the mean and standard deviation per scheme, the mean difference, and a Welch t-test. Three seeds cannot detect a small effect, so the honest reading of the result is "the difference is or is not larger than run-to-run noise", not a precise effect size.
+One controlled comparison at the `medium` size (12.4M non-embedding parameters): learned position embeddings against rotary positional encoding, everything else identical, three seeds each. The seed changes both the initialisation and the order in which training windows are visited. Because the two schemes are run with the same three seeds, the design is paired: the learned and RoPE runs with seed 0 saw the training windows in the same order, and likewise for seeds 1 and 2. The report therefore gives per-seed losses, the mean and standard deviation per scheme, and then works on the per-seed differences: their mean, their standard deviation, and a paired t-test (`scipy.stats.ttest_rel`). A paired test is the right one here because it removes the part of the run-to-run variance that the seed explains; treating the six runs as two independent samples would ignore that matching. Three seeds cannot detect a small effect, so the honest reading of the result is "the difference is or is not larger than run-to-run noise", not a precise effect size.
 
 ### Reproduction
 
@@ -151,7 +151,7 @@ python -m scaling_lm.report        # scaling_fit.json, figures, results/summary.
 pytest
 ```
 
-`train.py` can also run a single configuration (`python -m scaling_lm.train --model-size small --positional rope --seed 1`). Every script skips runs whose `result.json` already exists, so the sweep can be resumed after an interruption. `--max-steps` and `--batch-size` exist for smoke tests only and are never used for reported results.
+`train.py` can also run a single configuration (`python -m scaling_lm.train --model-size small --positional rope --seed 1`). Every script skips runs whose `result.json` already exists, so the sweep can be resumed after an interruption. A skipped run is only accepted if it was trained with the same training settings and on the same corpus: each result stores a SHA-256 fingerprint of `corpus_stats.json` and the three token files, and a mismatch is an error rather than a silent reuse. `--max-steps` and `--batch-size` exist for smoke tests only and are never used for reported results.
 
 ## Results
 
