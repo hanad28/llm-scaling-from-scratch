@@ -2,9 +2,10 @@
 
     python -m scaling_lm.report [--results-dir PATH] [--title TEXT]
 
-Reads scaling_sweep.json, positional_ablation.json (optional), generations.json
-(optional) and data/corpus_stats.json, then writes scaling_fit.json, the figures
-and summary.md into the results directory.
+Reads the sweep and ablation manifests (which runs to report), generations.json
+(optional) and data/corpus_stats.json, then writes scaling_fit.json, the figures and
+summary.md into the results directory. Every number about a run comes from its verified
+result.json via `runs.load_run`; the manifests contribute run names only.
 """
 
 from __future__ import annotations
@@ -15,12 +16,17 @@ import logging
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-import numpy as np
-
+from scaling_lm.ablation import (
+    AblationAnalysis,
+    AblationManifest,
+    analyse_ablation,
+    read_ablation_manifest,
+)
 from scaling_lm.config import CORPUS_STATS_PATH, KAPLAN_ALPHA_N, ResultsPaths
 from scaling_lm.plots import plot_ablation, plot_scaling_law, plot_training_curves
 from scaling_lm.runs import RunResult, load_run
 from scaling_lm.scaling_fit import PowerLawFit, fit_power_law
+from scaling_lm.sweep import read_sweep_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +40,17 @@ def load_json(path: Path) -> object | None:
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def fit_from_sweep(sweep: Sequence[Mapping[str, object]]) -> PowerLawFit:
-    counts = np.array([entry["non_embedding_params"] for entry in sweep], dtype=float)
-    losses = np.array([entry["final_validation_loss"] for entry in sweep], dtype=float)
+def fit_from_results(results: Sequence[RunResult]) -> PowerLawFit:
+    counts = [result.parameters["non_embedding"] for result in results]
+    losses = [result.final_validation_loss for result in results]
     return fit_power_law(counts, losses)
+
+
+def architecture_of(result: RunResult) -> Mapping[str, object]:
+    architecture = result.identity.specification["architecture"]
+    if not isinstance(architecture, dict):
+        raise ValueError(f"{result.run_name}: result has no architecture section")
+    return architecture
 
 
 def format_int(value: object) -> str:
@@ -68,20 +81,21 @@ def corpus_section(stats: Mapping[str, object] | None) -> list[str]:
     return lines
 
 
-def sweep_section(sweep: Sequence[Mapping[str, object]]) -> list[str]:
+def sweep_section(results: Sequence[RunResult]) -> list[str]:
     lines = [
         "| Size | Layers | d_model | Heads | Non-embedding params | Total params | Steps | "
         "Tokens seen | Peak LR | Validation loss | Test loss | Wall time |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
-    for entry in sweep:
+    for result in results:
+        architecture = architecture_of(result)
         lines.append(
-            f"| {entry['model_size']} | {entry['n_layer']} | {entry['d_model']} | "
-            f"{entry['n_head']} | {format_millions(entry['non_embedding_params'])} | "
-            f"{format_millions(entry['total_params'])} | {format_int(entry['total_steps'])} | "
-            f"{format_millions(entry['tokens_seen'])} | {entry['peak_learning_rate']:.2e} | "
-            f"{entry['final_validation_loss']:.4f} | {entry['final_test_loss']:.4f} | "
-            f"{entry['wall_time_seconds'] / 60:.1f} min |"
+            f"| {result.model_size} | {architecture['n_layer']} | {architecture['d_model']} | "
+            f"{architecture['n_head']} | {format_millions(result.parameters['non_embedding'])} | "
+            f"{format_millions(result.parameters['total'])} | {format_int(result.total_steps)} | "
+            f"{format_millions(result.tokens_seen)} | {result.peak_learning_rate:.2e} | "
+            f"{result.final_validation_loss:.4f} | {result.final_test_loss:.4f} | "
+            f"{result.wall_time_seconds / 60:.1f} min |"
         )
     return lines
 
@@ -101,24 +115,27 @@ def fit_section(fit: PowerLawFit) -> list[str]:
     ]
 
 
-def ablation_section(ablation: Mapping[str, object] | None) -> list[str]:
+AblationReport = tuple[AblationManifest, AblationAnalysis]
+
+
+def ablation_section(ablation: AblationReport | None) -> list[str]:
     if ablation is None:
         return ["Ablation not run (run `python -m scaling_lm.ablation`)."]
-    schemes = ablation["schemes"]
+    manifest, analysis = ablation
     lines = [
-        f"Model size: {ablation['model_size']}.",
+        f"Model size: {manifest.model_size}.",
         "",
         "| Scheme | Seeds | Validation losses | Mean | Std (ddof=1) | Mean test loss |",
         "|---|---|---|---|---|---|",
     ]
-    for scheme, summary in schemes.items():
-        losses = ", ".join(f"{loss:.4f}" for loss in summary["validation_losses"])
+    for scheme, summary in analysis.schemes.items():
+        losses = ", ".join(f"{loss:.4f}" for loss in summary.validation_losses)
         lines.append(
-            f"| {scheme} | {len(summary['seeds'])} | {losses} | "
-            f"{summary['mean_validation_loss']:.4f} | {summary['std_validation_loss']:.4f} | "
-            f"{summary['mean_test_loss']:.4f} |"
+            f"| {scheme} | {len(summary.seeds)} | {losses} | "
+            f"{summary.mean_validation_loss:.4f} | {summary.std_validation_loss:.4f} | "
+            f"{summary.mean_test_loss:.4f} |"
         )
-    comparison = ablation["comparison"]
+    comparison = analysis.comparison
     lines.extend(
         [
             "",
@@ -127,12 +144,22 @@ def ablation_section(ablation: Mapping[str, object] | None) -> list[str]:
         ]
     )
     if "paired_p_value" in comparison:
-        lines.append(
-            f"Paired t-test on the per-seed differences (runs are matched by seed, so each "
-            f"pair saw the training windows in the same order): "
-            f"t = {comparison['paired_t_statistic']:.2f}, "
-            f"p = {comparison['paired_p_value']:.3f}, "
-            f"std of the differences = {comparison['std_difference']:.4f}."
+        lines.extend(
+            [
+                "",
+                "Paired t-test on the per-seed differences: "
+                f"t = {comparison['paired_t_statistic']:.2f}, "
+                f"p = {comparison['paired_p_value']:.3f}, "
+                f"std of the differences = {comparison['std_difference']:.4f}. "
+                "The pairing is by seed: for one seed the two schemes start from bitwise "
+                "identical shared weights (the learned position table is initialised after "
+                "everything else) and visit the training windows in the same order, so each "
+                "difference isolates the scheme. Kernel-level non-determinism on the GPU is "
+                "not controlled by the seed and remains inside the differences.",
+                "Welch's unpaired t-test, which assumes no pairing: "
+                f"t = {comparison['welch_t_statistic']:.2f}, "
+                f"p = {comparison['welch_p_value']:.3f}.",
+            ]
         )
     return lines
 
@@ -152,43 +179,50 @@ def generation_section(generations: Mapping[str, Mapping[str, str]] | None) -> l
 
 
 def write_figures(
-    sweep: Sequence[Mapping[str, object]],
     results: Sequence[RunResult],
     fit: PowerLawFit,
-    ablation: Mapping[str, object] | None,
+    ablation: AblationReport | None,
     paths: ResultsPaths,
 ) -> None:
     plot_scaling_law(
-        parameter_counts=[int(entry["non_embedding_params"]) for entry in sweep],
-        losses=[float(entry["final_validation_loss"]) for entry in sweep],
-        labels=[str(entry["model_size"]) for entry in sweep],
+        parameter_counts=[result.parameters["non_embedding"] for result in results],
+        losses=[result.final_validation_loss for result in results],
+        labels=[result.model_size for result in results],
         fit=fit,
         output_path=paths.figures / SCALING_FIGURE,
         kaplan_alpha=KAPLAN_ALPHA_N,
     )
     plot_training_curves(results, paths.figures / CURVES_FIGURE)
     if ablation is not None:
+        manifest, analysis = ablation
         scheme_losses = {
-            scheme: summary["validation_losses"] for scheme, summary in ablation["schemes"].items()
+            scheme: summary.validation_losses for scheme, summary in analysis.schemes.items()
         }
-        plot_ablation(scheme_losses, str(ablation["model_size"]), paths.figures / ABLATION_FIGURE)
+        plot_ablation(scheme_losses, manifest.model_size, paths.figures / ABLATION_FIGURE)
+
+
+def load_ablation(paths: ResultsPaths) -> AblationReport | None:
+    """The ablation manifest with its statistics recomputed from the verified results."""
+    manifest = read_ablation_manifest(paths)
+    if manifest is None:
+        return None
+    per_scheme = {
+        scheme: [load_run(run_name, paths) for run_name in run_names]
+        for scheme, run_names in manifest.run_names.items()
+    }
+    return manifest, analyse_ablation(per_scheme)
 
 
 def build_report(paths: ResultsPaths, title: str) -> PowerLawFit:
     """Fit the power law, draw the figures and write summary.md. Returns the fit."""
-    sweep = load_json(paths.sweep_summary)
-    if sweep is None:
-        raise FileNotFoundError(f"{paths.sweep_summary} not found; run the sweep first")
-    if not sweep:
-        raise ValueError(f"{paths.sweep_summary} lists no runs")
-    results = [load_run(str(entry["run_name"]), paths) for entry in sweep]
-    ablation = load_json(paths.ablation_summary)
+    results = [load_run(run_name, paths) for run_name in read_sweep_manifest(paths)]
+    ablation = load_ablation(paths)
     generations = load_json(paths.generations)
     corpus_stats = load_json(CORPUS_STATS_PATH)
 
-    fit = fit_from_sweep(sweep)
+    fit = fit_from_results(results)
     paths.scaling_fit.write_text(json.dumps(fit.to_dict(), indent=2))
-    write_figures(sweep, results, fit, ablation, paths)
+    write_figures(results, fit, ablation, paths)
 
     sections = [
         f"# {title}",
@@ -199,7 +233,7 @@ def build_report(paths: ResultsPaths, title: str) -> PowerLawFit:
         "",
         "## Scaling sweep",
         "",
-        *sweep_section(sweep),
+        *sweep_section(results),
         "",
         f"![Scaling law]({paths.figures.name}/{SCALING_FIGURE})",
         "",

@@ -20,6 +20,7 @@ from scaling_lm.config import (
     ResultsPaths,
 )
 from scaling_lm.model import GPT
+from scaling_lm.sweep import read_sweep_manifest
 from scaling_lm.tokenizer import load_tokenizer
 from scaling_lm.train import load_model, select_device
 from scaling_lm.validation import require_positive, require_unique
@@ -64,11 +65,6 @@ def generate_for_runs(run_names: list[str], paths: ResultsPaths) -> dict[str, di
     return samples
 
 
-def sweep_run_names(paths: ResultsPaths) -> list[str]:
-    summary = json.loads(paths.sweep_summary.read_text())
-    return [entry["run_name"] for entry in summary]
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results-dir", type=Path, default=ResultsPaths().root)
@@ -78,7 +74,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     paths = ResultsPaths(parse_args().results_dir)
-    generate_for_runs(sweep_run_names(paths), paths)
+    generate_for_runs(read_sweep_manifest(paths), paths)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,10 @@
 
 Finished runs (those with a result.json) are skipped, so the sweep can be resumed; see
 `runs.resolve_run` for the fingerprint check that guards the reuse.
+
+scaling_sweep.json is a manifest: the run names in sweep order and nothing else. Losses
+and parameter counts live only in each run's result.json and are read through
+`runs.load_run`, so a regenerated run can never be reported from a stale copy.
 """
 
 from __future__ import annotations
@@ -28,31 +32,25 @@ from scaling_lm.validation import require_unique
 logger = logging.getLogger(__name__)
 
 SWEEP_SEED = 0
+MANIFEST_KEY = "run_names"
 
 
-def summarise_run(result: RunResult) -> dict[str, object]:
-    architecture = result.specification["architecture"]
-    if not isinstance(architecture, dict):
-        raise ValueError(f"{result.run_name}: result has no architecture section")
-    return {
-        "run_name": result.run_name,
-        "model_size": result.model_size,
-        "positional_scheme": result.positional_scheme,
-        "seed": result.seed,
-        "n_layer": architecture["n_layer"],
-        "d_model": architecture["d_model"],
-        "n_head": architecture["n_head"],
-        "run_fingerprint": result.run_fingerprint,
-        "non_embedding_params": result.parameters["non_embedding"],
-        "total_params": result.parameters["total"],
-        "total_steps": result.total_steps,
-        "tokens_seen": result.tokens_seen,
-        "peak_learning_rate": result.peak_learning_rate,
-        "final_validation_loss": result.final_validation_loss,
-        "final_test_loss": result.final_test_loss,
-        "wall_time_seconds": result.wall_time_seconds,
-        "device": result.device,
-    }
+def write_sweep_manifest(results: Sequence[RunResult], paths: ResultsPaths) -> None:
+    paths.root.mkdir(parents=True, exist_ok=True)
+    manifest = {MANIFEST_KEY: [result.run_name for result in results]}
+    paths.sweep_summary.write_text(json.dumps(manifest, indent=2))
+
+
+def read_sweep_manifest(paths: ResultsPaths) -> list[str]:
+    """Run names in sweep order. Raises if the sweep has not been run or lists no runs."""
+    if not paths.sweep_summary.exists():
+        raise FileNotFoundError(f"{paths.sweep_summary} not found; run the sweep first")
+    manifest = json.loads(paths.sweep_summary.read_text())
+    run_names = manifest.get(MANIFEST_KEY) if isinstance(manifest, dict) else None
+    if not isinstance(run_names, list) or not run_names:
+        raise ValueError(f"{paths.sweep_summary} lists no runs")
+    require_unique("run_names", run_names)
+    return [str(run_name) for run_name in run_names]
 
 
 def run_sweep(
@@ -69,10 +67,7 @@ def run_sweep(
             training=training,
         )
         results.append(train_or_load(run_config, paths))
-    paths.root.mkdir(parents=True, exist_ok=True)
-    paths.sweep_summary.write_text(
-        json.dumps([summarise_run(result) for result in results], indent=2)
-    )
+    write_sweep_manifest(results, paths)
     return results
 
 
