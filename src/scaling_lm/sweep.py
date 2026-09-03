@@ -3,7 +3,7 @@
     python -m scaling_lm.sweep [--sizes tiny small ...] [--results-dir PATH]
 
 Finished runs (those with a result.json) are skipped, so the sweep can be resumed; see
-`train.train_or_load` for the config and corpus checks that guard the reuse.
+`runs.resolve_run` for the fingerprint check that guards the reuse.
 """
 
 from __future__ import annotations
@@ -21,12 +21,9 @@ from scaling_lm.config import (
     RunConfig,
     TrainingConfig,
 )
-from scaling_lm.train import (
-    RunResult,
-    add_training_arguments,
-    train_or_load,
-    training_config_from_args,
-)
+from scaling_lm.runs import RunResult
+from scaling_lm.train import add_training_arguments, train_or_load, training_config_from_args
+from scaling_lm.validation import require_unique
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +31,18 @@ SWEEP_SEED = 0
 
 
 def summarise_run(result: RunResult) -> dict[str, object]:
+    architecture = result.specification["architecture"]
+    if not isinstance(architecture, dict):
+        raise ValueError(f"{result.run_name}: result has no architecture section")
     return {
         "run_name": result.run_name,
         "model_size": result.model_size,
         "positional_scheme": result.positional_scheme,
         "seed": result.seed,
-        "n_layer": result.architecture["n_layer"],
-        "d_model": result.architecture["d_model"],
-        "n_head": result.architecture["n_head"],
+        "n_layer": architecture["n_layer"],
+        "d_model": architecture["d_model"],
+        "n_head": architecture["n_head"],
+        "run_fingerprint": result.run_fingerprint,
         "non_embedding_params": result.parameters["non_embedding"],
         "total_params": result.parameters["total"],
         "total_steps": result.total_steps,
@@ -58,6 +59,7 @@ def run_sweep(
     size_names: Sequence[str], training: TrainingConfig, paths: ResultsPaths
 ) -> list[RunResult]:
     """Train the requested sizes in order and write results/scaling_sweep.json."""
+    require_unique("sizes", list(size_names))
     results = []
     for size_name in size_names:
         run_config = RunConfig(

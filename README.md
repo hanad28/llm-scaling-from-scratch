@@ -151,7 +151,7 @@ python -m scaling_lm.report        # scaling_fit.json, figures, results/summary.
 pytest
 ```
 
-`train.py` can also run a single configuration (`python -m scaling_lm.train --model-size small --positional rope --seed 1`). Every script skips runs whose `result.json` already exists, so the sweep can be resumed after an interruption. A skipped run is only accepted if it was trained with the same training settings and on the same corpus: each result stores a SHA-256 fingerprint of `corpus_stats.json` and the three token files, and a mismatch is an error rather than a silent reuse. `--max-steps` and `--batch-size` exist for smoke tests only and are never used for reported results.
+`train.py` can also run a single configuration (`python -m scaling_lm.train --model-size small --positional rope --seed 1`). Every script skips runs whose `result.json` already exists, so the sweep can be resumed after an interruption. A skipped run is only accepted if it is exactly the run the current code and data describe: each result stores the full run specification (corpus fingerprint, resolved architecture, training schedule and constants) and a SHA-256 hash over the whole of it. `runs.py` is the single place this check lives, and the sweep, single-model, generation and report scripts all load results through it, so any mismatch is an error rather than a silent reuse. `--max-steps` and `--batch-size` exist for smoke tests only and are never used for reported results.
 
 ## Results
 

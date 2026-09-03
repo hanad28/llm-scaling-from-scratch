@@ -4,8 +4,8 @@ Run one configuration directly with:
 
     python -m scaling_lm.train --model-size small [--positional rope] [--seed 1]
 
-A run whose result.json already exists is loaded rather than retrained, provided it was
-trained with the same TrainingConfig on the same corpus (checked by fingerprint).
+A run whose result.json already exists is loaded rather than retrained, provided
+`runs.resolve_run` accepts it as the same run (same corpus, architecture and schedule).
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import json
 import logging
 import math
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -23,7 +23,6 @@ import torch
 from torch import Tensor, nn
 
 from scaling_lm.config import (
-    CONTEXT_LENGTH,
     FINAL_LR_FRACTION,
     KAPLAN_LR_INTERCEPT,
     KAPLAN_LR_SLOPE,
@@ -36,43 +35,19 @@ from scaling_lm.config import (
 )
 from scaling_lm.dataset import TokenWindows, epoch_batches, sequential_batches
 from scaling_lm.model import GPT, GPTConfig
-from scaling_lm.tokenizer import corpus_fingerprint
+from scaling_lm.runs import (
+    CHECKPOINT_FILENAME,
+    RESULT_FILENAME,
+    EvalPoint,
+    RunResult,
+    fingerprint_specification,
+    load_run,
+    resolve_run,
+    run_specification,
+)
+from scaling_lm.validation import non_negative_int, positive_int
 
 logger = logging.getLogger(__name__)
-
-CHECKPOINT_FILENAME = "model.pt"
-RESULT_FILENAME = "result.json"
-
-
-@dataclass
-class EvalPoint:
-    step: int
-    tokens_seen: int
-    train_loss: float
-    validation_loss: float
-    learning_rate: float
-
-
-@dataclass
-class RunResult:
-    """Everything recorded about a finished run, written to results/runs/<run_name>/result.json."""
-
-    run_name: str
-    model_size: str
-    positional_scheme: str
-    seed: int
-    parameters: dict[str, int]
-    architecture: dict[str, int]
-    training: dict[str, object]
-    corpus_fingerprint: str
-    total_steps: int
-    tokens_seen: int
-    peak_learning_rate: float
-    final_validation_loss: float
-    final_test_loss: float
-    wall_time_seconds: float
-    device: str
-    history: list[EvalPoint] = field(default_factory=list)
 
 
 def select_device() -> torch.device:
@@ -150,6 +125,20 @@ def micro_batches_per_step(config: TrainingConfig) -> int:
     return config.gradient_accumulation_steps
 
 
+def planned_steps(train_window_count: int, config: TrainingConfig) -> int:
+    """Optimiser steps in one pass (full batches only), capped by max_steps. Must be at least 1."""
+    micro_batches_total = train_window_count // config.batch_size_sequences
+    total_steps = micro_batches_total // micro_batches_per_step(config)
+    if config.max_steps is not None:
+        total_steps = min(total_steps, config.max_steps)
+    if total_steps < 1:
+        raise ValueError(
+            f"training split has {train_window_count} windows, not enough for one step of "
+            f"{config.batch_size_sequences} x {config.gradient_accumulation_steps} sequences"
+        )
+    return total_steps
+
+
 def train_step(
     model: nn.Module,
     optimizer: torch.optim.AdamW,
@@ -184,14 +173,11 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
     # torch.compile wraps the module; keep the raw model for parameter counts and saving.
     forward_model: nn.Module = torch.compile(model) if config.compile_model else model
 
-    fingerprint = corpus_fingerprint()
+    specification = run_specification(run_config)
     train_windows = TokenWindows("train")
     validation_windows = TokenWindows("validation")
     test_windows = TokenWindows("test")
-    micro_batches_total = len(train_windows) // config.batch_size_sequences
-    total_steps = micro_batches_total // micro_batches_per_step(config)
-    if config.max_steps is not None:
-        total_steps = min(total_steps, config.max_steps)
+    total_steps = planned_steps(len(train_windows), config)
     logger.info(
         "%s: %s params, %d steps of %d tokens, peak lr %.2e, device %s",
         run_config.run_name,
@@ -267,21 +253,14 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
         wall_time,
     )
 
-    size = MODEL_SIZES_BY_NAME[run_config.model_size]
     result = RunResult(
         run_name=run_config.run_name,
         model_size=run_config.model_size,
         positional_scheme=run_config.positional_scheme,
         seed=run_config.seed,
         parameters=parameter_counts,
-        architecture={
-            "n_layer": size.n_layer,
-            "d_model": size.d_model,
-            "n_head": size.n_head,
-            "context_length": CONTEXT_LENGTH,
-        },
-        training=asdict(config),
-        corpus_fingerprint=fingerprint,
+        specification=specification,
+        run_fingerprint=fingerprint_specification(specification),
         total_steps=total_steps,
         tokens_seen=total_steps * config.tokens_per_step,
         peak_learning_rate=peak_lr,
@@ -300,40 +279,14 @@ def save_run(model: GPT, result: RunResult, output_dir: Path) -> None:
     (output_dir / RESULT_FILENAME).write_text(json.dumps(asdict(result), indent=2))
 
 
-def result_exists(run_name: str, paths: ResultsPaths) -> bool:
-    return (paths.run_directory(run_name) / RESULT_FILENAME).exists()
-
-
-def load_result(run_name: str, paths: ResultsPaths) -> RunResult:
-    payload = json.loads((paths.run_directory(run_name) / RESULT_FILENAME).read_text())
-    payload["history"] = [EvalPoint(**point) for point in payload["history"]]
-    return RunResult(**payload)
-
-
 def train_or_load(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
-    """Reuse a finished run only if its training config and corpus match the request exactly."""
-    if not result_exists(run_config.run_name, paths):
-        return train_run(run_config, paths)
-    result = load_result(run_config.run_name, paths)
-    requested = asdict(run_config.training)
-    if result.training != requested:
-        raise RuntimeError(
-            f"{run_config.run_name} exists but was trained with {result.training}, "
-            f"not the requested {requested}; delete it or use another --results-dir"
-        )
-    current_fingerprint = corpus_fingerprint()
-    if result.corpus_fingerprint != current_fingerprint:
-        raise RuntimeError(
-            f"{run_config.run_name} exists but was trained on corpus "
-            f"{result.corpus_fingerprint[:12]}, not the current {current_fingerprint[:12]}; "
-            "the token files have changed since that run, delete it or use another --results-dir"
-        )
-    logger.info("%s already finished, loading result", run_config.run_name)
-    return result
+    """Return the verified saved result for this run, training it first if there is none."""
+    existing = resolve_run(run_config, paths)
+    return existing if existing is not None else train_run(run_config, paths)
 
 
 def load_model(run_name: str, paths: ResultsPaths, device: torch.device) -> GPT:
-    result = load_result(run_name, paths)
+    result = load_run(run_name, paths)
     size = MODEL_SIZES_BY_NAME[result.model_size]
     model = GPT(GPTConfig.from_model_size(size, result.positional_scheme))
     checkpoint_path = paths.run_directory(run_name) / CHECKPOINT_FILENAME
@@ -346,12 +299,14 @@ def add_training_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--results-dir", type=Path, default=ResultsPaths().root, help="where to write run artefacts"
     )
-    parser.add_argument("--batch-size", type=int, default=defaults.batch_size_sequences)
+    parser.add_argument("--batch-size", type=positive_int, default=defaults.batch_size_sequences)
     parser.add_argument(
-        "--grad-accumulation", type=int, default=defaults.gradient_accumulation_steps
+        "--grad-accumulation", type=positive_int, default=defaults.gradient_accumulation_steps
     )
-    parser.add_argument("--max-steps", type=int, default=None, help="cap steps (smoke tests)")
-    parser.add_argument("--eval-interval", type=int, default=defaults.eval_interval_steps)
+    parser.add_argument(
+        "--max-steps", type=positive_int, default=None, help="cap steps (smoke tests)"
+    )
+    parser.add_argument("--eval-interval", type=positive_int, default=defaults.eval_interval_steps)
     parser.add_argument("--no-mixed-precision", action="store_true")
     parser.add_argument("--compile", action="store_true")
 
@@ -371,7 +326,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-size", required=True, choices=sorted(MODEL_SIZES_BY_NAME))
     parser.add_argument("--positional", default="learned", choices=POSITIONAL_SCHEMES)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=non_negative_int, default=0)
     add_training_arguments(parser)
     return parser.parse_args()
 

@@ -12,8 +12,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
+from scaling_lm.runs import RunResult  # noqa: E402
 from scaling_lm.scaling_fit import PowerLawFit  # noqa: E402
-from scaling_lm.train import RunResult  # noqa: E402
 
 FIGURE_DPI = 150
 FIGURE_SIZE = (7.0, 4.5)

@@ -19,8 +19,8 @@ import numpy as np
 
 from scaling_lm.config import CORPUS_STATS_PATH, KAPLAN_ALPHA_N, ResultsPaths
 from scaling_lm.plots import plot_ablation, plot_scaling_law, plot_training_curves
+from scaling_lm.runs import RunResult, load_run
 from scaling_lm.scaling_fit import PowerLawFit, fit_power_law
-from scaling_lm.train import RunResult, load_result
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +179,9 @@ def build_report(paths: ResultsPaths, title: str) -> PowerLawFit:
     sweep = load_json(paths.sweep_summary)
     if sweep is None:
         raise FileNotFoundError(f"{paths.sweep_summary} not found; run the sweep first")
-    results = [load_result(str(entry["run_name"]), paths) for entry in sweep]
+    if not sweep:
+        raise ValueError(f"{paths.sweep_summary} lists no runs")
+    results = [load_run(str(entry["run_name"]), paths) for entry in sweep]
     ablation = load_json(paths.ablation_summary)
     generations = load_json(paths.generations)
     corpus_stats = load_json(CORPUS_STATS_PATH)
