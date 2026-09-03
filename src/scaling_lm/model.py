@@ -17,7 +17,10 @@ from torch import Tensor, nn
 from scaling_lm.config import (
     CONTEXT_LENGTH,
     DEFAULT_POSITIONAL_SCHEME,
+    FREQUENCY_BASE,
     HEAD_DIM,
+    INIT_STD,
+    LAYER_NORM_EPS,
     MLP_EXPANSION,
     POSITIONAL_SCHEMES,
     VOCAB_SIZE,
@@ -30,14 +33,14 @@ from scaling_lm.positional import (
 )
 from scaling_lm.validation import require_positive
 
-# GPT-2 initialisation scale (Radford et al., 2019).
-INIT_STD = 0.02
-LAYER_NORM_EPS = 1e-5
-
 
 @dataclass(frozen=True)
 class GPTConfig:
-    """Full architecture specification for one model."""
+    """Full architecture specification for one model.
+
+    The model code reads every numeric setting from here and nowhere else, so the
+    resolved config is the complete architecture record that `runs.py` fingerprints.
+    """
 
     n_layer: int
     d_model: int
@@ -46,6 +49,9 @@ class GPTConfig:
     context_length: int = CONTEXT_LENGTH
     mlp_expansion: int = MLP_EXPANSION
     positional_scheme: str = DEFAULT_POSITIONAL_SCHEME
+    init_std: float = INIT_STD
+    layer_norm_eps: float = LAYER_NORM_EPS
+    positional_frequency_base: float = FREQUENCY_BASE
 
     def __post_init__(self) -> None:
         require_positive("n_layer", self.n_layer)
@@ -54,6 +60,9 @@ class GPTConfig:
         require_positive("vocab_size", self.vocab_size)
         require_positive("context_length", self.context_length)
         require_positive("mlp_expansion", self.mlp_expansion)
+        require_positive("init_std", self.init_std)
+        require_positive("layer_norm_eps", self.layer_norm_eps)
+        require_positive("positional_frequency_base", self.positional_frequency_base)
         if self.d_model % self.n_head != 0:
             raise ValueError("d_model must be divisible by n_head")
         if self.positional_scheme not in POSITIONAL_SCHEMES:
@@ -105,7 +114,9 @@ class CausalSelfAttention(nn.Module):
         self.output_projection = nn.Linear(config.d_model, config.d_model)
         self.rotary: RotaryPositionalEncoding | None = None
         if config.positional_scheme == "rope":
-            self.rotary = RotaryPositionalEncoding(config.head_dim, config.context_length)
+            self.rotary = RotaryPositionalEncoding(
+                config.head_dim, config.context_length, config.positional_frequency_base
+            )
         self.register_buffer("mask", causal_mask(config.context_length), persistent=False)
 
     def split_heads(self, projected: Tensor) -> Tensor:
@@ -154,9 +165,9 @@ class TransformerBlock(nn.Module):
 
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
-        self.attention_norm = LayerNorm(config.d_model)
+        self.attention_norm = LayerNorm(config.d_model, config.layer_norm_eps)
         self.attention = CausalSelfAttention(config)
-        self.mlp_norm = LayerNorm(config.d_model)
+        self.mlp_norm = LayerNorm(config.d_model, config.layer_norm_eps)
         self.mlp = FeedForward(config)
 
     def forward(self, hidden: Tensor) -> Tensor:
@@ -169,7 +180,9 @@ def build_additive_positional(config: GPTConfig) -> nn.Module | None:
     if config.positional_scheme == "learned":
         return LearnedPositionalEmbedding(config.context_length, config.d_model)
     if config.positional_scheme == "sinusoidal":
-        return SinusoidalPositionalEncoding(config.context_length, config.d_model)
+        return SinusoidalPositionalEncoding(
+            config.context_length, config.d_model, config.positional_frequency_base
+        )
     return None
 
 
@@ -182,7 +195,7 @@ class GPT(nn.Module):
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
         self.positional = build_additive_positional(config)
         self.blocks = nn.ModuleList(TransformerBlock(config) for _ in range(config.n_layer))
-        self.final_norm = LayerNorm(config.d_model)
+        self.final_norm = LayerNorm(config.d_model, config.layer_norm_eps)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         # Weight tying halves the embedding parameter count and is standard for GPT-2.
         self.lm_head.weight = self.token_embedding.weight
@@ -191,17 +204,17 @@ class GPT(nn.Module):
 
     def _init_weights(self, module: nn.Module) -> None:
         if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=INIT_STD)
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.init_std)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=INIT_STD)
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.init_std)
 
     def _scale_residual_projections(self) -> None:
         # Each block adds two residual contributions, so shrink their output
         # projections by 1/sqrt(2 * n_layer) to keep the residual stream variance
         # roughly constant with depth (Radford et al., 2019).
-        scale = INIT_STD / math.sqrt(2 * self.config.n_layer)
+        scale = self.config.init_std / math.sqrt(2 * self.config.n_layer)
         for block in self.blocks:
             nn.init.normal_(block.attention.output_projection.weight, mean=0.0, std=scale)
             nn.init.normal_(block.mlp.contract.weight, mean=0.0, std=scale)

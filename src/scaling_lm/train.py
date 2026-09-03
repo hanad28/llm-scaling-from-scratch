@@ -23,12 +23,8 @@ import torch
 from torch import Tensor, nn
 
 from scaling_lm.config import (
-    FINAL_LR_FRACTION,
-    KAPLAN_LR_INTERCEPT,
-    KAPLAN_LR_SLOPE,
     MODEL_SIZES_BY_NAME,
     POSITIONAL_SCHEMES,
-    WARMUP_FRACTION,
     ResultsPaths,
     RunConfig,
     TrainingConfig,
@@ -54,19 +50,19 @@ def select_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def kaplan_learning_rate(non_embedding_params: int) -> float:
+def kaplan_learning_rate(non_embedding_params: int, config: TrainingConfig) -> float:
     """Peak learning rate from Kaplan et al.'s (2020) empirical fit against model size."""
-    return KAPLAN_LR_INTERCEPT + KAPLAN_LR_SLOPE * math.log(non_embedding_params)
+    return config.kaplan_lr_intercept + config.kaplan_lr_slope * math.log(non_embedding_params)
 
 
-def learning_rate_at(step: int, total_steps: int, peak: float) -> float:
-    """Linear warmup to `peak`, then cosine decay to FINAL_LR_FRACTION * peak."""
-    warmup_steps = max(1, int(WARMUP_FRACTION * total_steps))
+def learning_rate_at(step: int, total_steps: int, peak: float, config: TrainingConfig) -> float:
+    """Linear warmup to `peak`, then cosine decay to `config.final_lr_fraction * peak`."""
+    warmup_steps = max(1, int(config.warmup_fraction * total_steps))
     if step < warmup_steps:
         return peak * (step + 1) / warmup_steps
     progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
     cosine = 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
-    floor = FINAL_LR_FRACTION * peak
+    floor = config.final_lr_fraction * peak
     return floor + (peak - floor) * cosine
 
 
@@ -169,7 +165,7 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
 
     model = build_model(run_config, device)
     parameter_counts = model.count_parameters()
-    peak_lr = kaplan_learning_rate(parameter_counts["non_embedding"])
+    peak_lr = kaplan_learning_rate(parameter_counts["non_embedding"], config)
     # torch.compile wraps the module; keep the raw model for parameter counts and saving.
     forward_model: nn.Module = torch.compile(model) if config.compile_model else model
 
@@ -194,7 +190,7 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
     start_time = time.time()
     forward_model.train()
     for step in range(total_steps):
-        learning_rate = learning_rate_at(step, total_steps, peak_lr)
+        learning_rate = learning_rate_at(step, total_steps, peak_lr, config)
         for group in optimizer.param_groups:
             group["lr"] = learning_rate
         micro_batches = [

@@ -12,12 +12,8 @@ import math
 import torch
 from torch import Tensor, nn
 
-# Base of the geometric frequency progression used by Vaswani et al. (2017) and
-# retained by Su et al. (2024) for RoPE.
-FREQUENCY_BASE = 10_000.0
 
-
-def sinusoidal_table(context_length: int, d_model: int) -> Tensor:
+def sinusoidal_table(context_length: int, d_model: int, frequency_base: float) -> Tensor:
     """Return the fixed (context_length, d_model) sine/cosine table of Vaswani et al. (2017).
 
     Even columns hold sin(pos / base^(2i/d)), odd columns hold the matching cosine.
@@ -26,7 +22,7 @@ def sinusoidal_table(context_length: int, d_model: int) -> Tensor:
         raise ValueError("d_model must be even for sinusoidal encoding")
     positions = torch.arange(context_length, dtype=torch.float32).unsqueeze(1)
     pair_indices = torch.arange(0, d_model, 2, dtype=torch.float32)
-    inverse_frequencies = torch.exp(-math.log(FREQUENCY_BASE) * pair_indices / d_model)
+    inverse_frequencies = torch.exp(-math.log(frequency_base) * pair_indices / d_model)
     angles = positions * inverse_frequencies
     table = torch.zeros(context_length, d_model)
     table[:, 0::2] = torch.sin(angles)
@@ -49,9 +45,10 @@ class LearnedPositionalEmbedding(nn.Module):
 class SinusoidalPositionalEncoding(nn.Module):
     """Fixed sine/cosine encoding with no trainable parameters."""
 
-    def __init__(self, context_length: int, d_model: int) -> None:
+    def __init__(self, context_length: int, d_model: int, frequency_base: float) -> None:
         super().__init__()
-        self.register_buffer("table", sinusoidal_table(context_length, d_model), persistent=False)
+        table = sinusoidal_table(context_length, d_model, frequency_base)
+        self.register_buffer("table", table, persistent=False)
 
     def forward(self, sequence_length: int) -> Tensor:
         return self.table[:sequence_length]
@@ -65,12 +62,12 @@ class RotaryPositionalEncoding(nn.Module):
     products up to the angle difference, q_m . k_n depends only on m - n.
     """
 
-    def __init__(self, head_dim: int, context_length: int) -> None:
+    def __init__(self, head_dim: int, context_length: int, frequency_base: float) -> None:
         super().__init__()
         if head_dim % 2 != 0:
             raise ValueError("head_dim must be even for rotary encoding")
         pair_indices = torch.arange(0, head_dim, 2, dtype=torch.float32)
-        inverse_frequencies = 1.0 / (FREQUENCY_BASE ** (pair_indices / head_dim))
+        inverse_frequencies = 1.0 / (frequency_base ** (pair_indices / head_dim))
         positions = torch.arange(context_length, dtype=torch.float32)
         angles = torch.outer(positions, inverse_frequencies)
         self.register_buffer("cos_table", torch.cos(angles), persistent=False)

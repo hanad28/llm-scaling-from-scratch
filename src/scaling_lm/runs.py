@@ -1,10 +1,11 @@
 """Run identity and the single place that decides whether a saved result may be reused.
 
 A run is identified by a fingerprint over everything that determines its result: the
-corpus (token files), the resolved architecture (GPTConfig plus the initialisation
-constants) and the resolved schedule (TrainingConfig, seed and the learning-rate
-constants). The fingerprint is a hash of that whole specification, so adding a new
-constant to `run_specification` is the only step needed to make it part of the check.
+corpus (token files), the resolved GPTConfig and the resolved TrainingConfig plus seed.
+The fingerprint is a hash of that whole specification. There is no list of constants to
+maintain here: the model and training code read every tunable from those two config
+objects (tests/test_constant_staleness.py enforces this), so a constant is part of the
+fingerprint by construction.
 
 Every reader of a result.json goes through `verify_result`, via either
 `resolve_run` (a requested RunConfig, used before training) or `load_run` (a run
@@ -16,19 +17,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field
 
-from scaling_lm.config import (
-    FINAL_LR_FRACTION,
-    KAPLAN_LR_INTERCEPT,
-    KAPLAN_LR_SLOPE,
-    MODEL_SIZES_BY_NAME,
-    WARMUP_FRACTION,
-    ResultsPaths,
-    RunConfig,
-    TrainingConfig,
-)
-from scaling_lm.model import INIT_STD, LAYER_NORM_EPS, GPTConfig
+from scaling_lm.config import MODEL_SIZES_BY_NAME, ResultsPaths, RunConfig, TrainingConfig
+from scaling_lm.model import GPTConfig
 from scaling_lm.tokenizer import corpus_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -82,19 +74,8 @@ def run_specification(run_config: RunConfig) -> dict[str, object]:
     model = GPTConfig.from_model_size(size, run_config.positional_scheme)
     return {
         "corpus": corpus_fingerprint(),
-        "architecture": {
-            **asdict(model),
-            "init_std": INIT_STD,
-            "layer_norm_eps": LAYER_NORM_EPS,
-        },
-        "schedule": {
-            **asdict(run_config.training),
-            "seed": run_config.seed,
-            "warmup_fraction": WARMUP_FRACTION,
-            "final_lr_fraction": FINAL_LR_FRACTION,
-            "kaplan_lr_intercept": KAPLAN_LR_INTERCEPT,
-            "kaplan_lr_slope": KAPLAN_LR_SLOPE,
-        },
+        "architecture": asdict(model),
+        "schedule": {**asdict(run_config.training), "seed": run_config.seed},
     }
 
 
@@ -108,12 +89,20 @@ def run_fingerprint(run_config: RunConfig) -> str:
 
 
 def run_config_of(result: RunResult) -> RunConfig:
-    """Rebuild the RunConfig a saved result claims to have been trained with."""
+    """Rebuild the request a saved result answers: its name plus the options its CLI was given.
+
+    Only the CLI options are taken from the saved record. Every other TrainingConfig
+    field comes from the current code, so checking the rebuilt request against the record
+    catches a changed constant just as `resolve_run` does for a fresh request.
+    """
     schedule = result.specification["schedule"]
     if not isinstance(schedule, dict):
         raise StaleRunError(f"{result.run_name}: result.json has no schedule section")
-    training_fields = {entry.name for entry in fields(TrainingConfig)}
-    training = {name: value for name, value in schedule.items() if name in training_fields}
+    option_names = TrainingConfig.cli_option_names()
+    missing = sorted(option_names - schedule.keys())
+    if missing:
+        raise StaleRunError(f"{result.run_name}: result.json schedule lacks {missing}")
+    training = {name: schedule[name] for name in option_names}
     return RunConfig(
         model_size=result.model_size,
         positional_scheme=result.positional_scheme,

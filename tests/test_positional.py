@@ -2,8 +2,8 @@ import math
 
 import torch
 
+from scaling_lm.config import FREQUENCY_BASE
 from scaling_lm.positional import (
-    FREQUENCY_BASE,
     LearnedPositionalEmbedding,
     RotaryPositionalEncoding,
     SinusoidalPositionalEncoding,
@@ -16,7 +16,7 @@ HEAD_DIM = 8
 
 
 def test_sinusoidal_table_matches_closed_form():
-    table = sinusoidal_table(CONTEXT, D_MODEL)
+    table = sinusoidal_table(CONTEXT, D_MODEL, FREQUENCY_BASE)
     assert table.shape == (CONTEXT, D_MODEL)
     position, pair = 5, 3
     angle = position / FREQUENCY_BASE ** (2 * pair / D_MODEL)
@@ -27,7 +27,7 @@ def test_sinusoidal_table_matches_closed_form():
 
 
 def test_sinusoidal_module_slices_to_sequence_length_and_has_no_parameters():
-    encoding = SinusoidalPositionalEncoding(CONTEXT, D_MODEL)
+    encoding = SinusoidalPositionalEncoding(CONTEXT, D_MODEL, FREQUENCY_BASE)
     assert encoding(10).shape == (10, D_MODEL)
     assert sum(parameter.numel() for parameter in encoding.parameters()) == 0
 
@@ -40,7 +40,7 @@ def test_learned_embedding_returns_one_vector_per_position():
 
 
 def test_rotary_preserves_vector_norms():
-    rotary = RotaryPositionalEncoding(HEAD_DIM, CONTEXT)
+    rotary = RotaryPositionalEncoding(HEAD_DIM, CONTEXT, FREQUENCY_BASE)
     queries = torch.randn(2, 3, CONTEXT, HEAD_DIM)
     keys = torch.randn(2, 3, CONTEXT, HEAD_DIM)
     rotated_queries, rotated_keys = rotary(queries, keys)
@@ -49,7 +49,7 @@ def test_rotary_preserves_vector_norms():
 
 
 def test_rotary_leaves_position_zero_unchanged():
-    rotary = RotaryPositionalEncoding(HEAD_DIM, CONTEXT)
+    rotary = RotaryPositionalEncoding(HEAD_DIM, CONTEXT, FREQUENCY_BASE)
     queries = torch.randn(1, 1, CONTEXT, HEAD_DIM)
     rotated, _ = rotary(queries, queries)
     assert torch.allclose(rotated[..., 0, :], queries[..., 0, :], atol=1e-6)
@@ -57,7 +57,7 @@ def test_rotary_leaves_position_zero_unchanged():
 
 def test_rotary_scores_depend_only_on_relative_position():
     """q_m . k_n must equal q_(m+s) . k_(n+s) for the same underlying vectors."""
-    rotary = RotaryPositionalEncoding(HEAD_DIM, CONTEXT)
+    rotary = RotaryPositionalEncoding(HEAD_DIM, CONTEXT, FREQUENCY_BASE)
     torch.manual_seed(0)
     query_vector = torch.randn(HEAD_DIM)
     key_vector = torch.randn(HEAD_DIM)

@@ -3,7 +3,7 @@ import pytest
 import torch
 
 from scaling_lm import dataset as dataset_module
-from scaling_lm.config import SPLIT_FRACTIONS, SPLIT_NAMES
+from scaling_lm.config import SPLIT_FRACTIONS, SPLIT_NAMES, TrainingConfig
 from scaling_lm.data import (
     Document,
     assign_split,
@@ -95,10 +95,11 @@ def test_epoch_order_depends_on_seed_but_not_on_call(fake_tokens):
 
 def test_learning_rate_schedule_shape():
     total_steps, peak = 1_000, 1e-3
-    rates = [learning_rate_at(step, total_steps, peak) for step in range(total_steps)]
-    warmup_end = int(0.05 * total_steps) - 1
+    config = TrainingConfig(warmup_fraction=0.05, final_lr_fraction=0.1)
+    rates = [learning_rate_at(step, total_steps, peak, config) for step in range(total_steps)]
+    warmup_end = int(config.warmup_fraction * total_steps) - 1
     assert rates[warmup_end] == pytest.approx(peak)
     assert max(rates) == pytest.approx(peak)
-    assert rates[-1] == pytest.approx(0.1 * peak, rel=1e-3)
+    assert rates[-1] == pytest.approx(config.final_lr_fraction * peak, rel=1e-3)
     decay = rates[warmup_end:]
     assert all(later <= earlier for earlier, later in zip(decay, decay[1:], strict=False))

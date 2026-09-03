@@ -5,7 +5,7 @@ Everything tunable lives here so that the experiment scripts contain no magic nu
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from scaling_lm.validation import (
@@ -101,11 +101,19 @@ TOKENIZER_TRAINING_DOCS = 200_000
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
+# Every constant the model code reads is a GPTConfig field defaulting to one of these,
+# so that the resolved GPTConfig is a complete record of the architecture.
 CONTEXT_LENGTH = 256
 HEAD_DIM = 64
 MLP_EXPANSION = 4
 POSITIONAL_SCHEMES = ("learned", "sinusoidal", "rope")
 DEFAULT_POSITIONAL_SCHEME = "learned"
+# GPT-2 initialisation scale (Radford et al., 2019).
+INIT_STD = 0.02
+LAYER_NORM_EPS = 1e-5
+# Base of the geometric frequency progression used by Vaswani et al. (2017) and
+# retained by Su et al. (2024) for RoPE.
+FREQUENCY_BASE = 10_000.0
 
 
 @dataclass(frozen=True)
@@ -145,6 +153,7 @@ ABLATION_SEEDS = (0, 1, 2)
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
+# As with the model, every constant the training loop reads is a TrainingConfig field.
 # Kaplan et al. (2020, appendix D.6) fitted lr(N) = 0.003239 - 0.0001395 ln(N)
 # for non-embedding parameter count N. The rule is used as-is for every size.
 KAPLAN_LR_INTERCEPT = 0.003239
@@ -155,24 +164,34 @@ FINAL_LR_FRACTION = 0.1
 WARMUP_FRACTION = 0.05
 
 
+# Marks the TrainingConfig fields a command line may set per invocation. When a saved
+# run is re-checked by name, only these are taken from the saved record; every other
+# field comes from the current code, so a changed constant is detected on that path too.
+CLI_OPTION = {"cli_option": True}
+
+
 @dataclass(frozen=True)
 class TrainingConfig:
     """Optimiser and schedule settings shared by every run in the sweep."""
 
-    batch_size_sequences: int = 128
-    gradient_accumulation_steps: int = 1
+    batch_size_sequences: int = field(default=128, metadata=CLI_OPTION)
+    gradient_accumulation_steps: int = field(default=1, metadata=CLI_OPTION)
     weight_decay: float = 0.1
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
     grad_clip_norm: float = 1.0
-    eval_interval_steps: int = 200
+    kaplan_lr_intercept: float = KAPLAN_LR_INTERCEPT
+    kaplan_lr_slope: float = KAPLAN_LR_SLOPE
+    warmup_fraction: float = WARMUP_FRACTION
+    final_lr_fraction: float = FINAL_LR_FRACTION
+    eval_interval_steps: int = field(default=200, metadata=CLI_OPTION)
     # Batches of validation data used for the periodic (cheap) evaluation.
     eval_batches_periodic: int = 20
-    use_mixed_precision: bool = True
-    compile_model: bool = False
+    use_mixed_precision: bool = field(default=True, metadata=CLI_OPTION)
+    compile_model: bool = field(default=False, metadata=CLI_OPTION)
     log_interval_steps: int = 50
     # Set to cap the number of training steps (used for smoke tests only).
-    max_steps: int | None = None
+    max_steps: int | None = field(default=None, metadata=CLI_OPTION)
 
     def __post_init__(self) -> None:
         require_positive("batch_size_sequences", self.batch_size_sequences)
@@ -184,12 +203,18 @@ class TrainingConfig:
         require_non_negative("weight_decay", self.weight_decay)
         require_unit_interval("adam_beta1", self.adam_beta1)
         require_unit_interval("adam_beta2", self.adam_beta2)
+        require_unit_interval("warmup_fraction", self.warmup_fraction)
+        require_non_negative("final_lr_fraction", self.final_lr_fraction)
         if self.max_steps is not None:
             require_positive("max_steps", self.max_steps)
 
     @property
     def tokens_per_step(self) -> int:
         return self.batch_size_sequences * self.gradient_accumulation_steps * CONTEXT_LENGTH
+
+    @classmethod
+    def cli_option_names(cls) -> frozenset[str]:
+        return frozenset(entry.name for entry in fields(cls) if entry.metadata.get("cli_option"))
 
 
 DEFAULT_TRAINING_CONFIG = TrainingConfig()

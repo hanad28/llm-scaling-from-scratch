@@ -1,5 +1,5 @@
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 
 import pytest
 from scipy import stats
@@ -7,7 +7,8 @@ from scipy import stats
 from scaling_lm import runs as runs_module
 from scaling_lm import train as train_module
 from scaling_lm.ablation import SchemeSummary, compare_schemes, summarise_scheme
-from scaling_lm.config import ResultsPaths, RunConfig, TrainingConfig
+from scaling_lm.config import INIT_STD, ResultsPaths, RunConfig, TrainingConfig
+from scaling_lm.model import GPTConfig
 from scaling_lm.report import build_report
 from scaling_lm.runs import (
     RESULT_FILENAME,
@@ -71,7 +72,7 @@ def saved_run(tmp_path, monkeypatch):
     return run_config, paths
 
 
-def test_fingerprint_covers_corpus_architecture_and_schedule(monkeypatch):
+def test_fingerprint_covers_corpus_architecture_and_schedule():
     training = TrainingConfig(max_steps=4)
     base = RunConfig("tiny", "learned", 0, training)
     baseline = run_fingerprint(base)
@@ -81,10 +82,9 @@ def test_fingerprint_covers_corpus_architecture_and_schedule(monkeypatch):
         RunConfig("tiny", "learned", 1, training),
         RunConfig("small", "learned", 0, training),
         RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4, weight_decay=0)),
+        RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4, warmup_fraction=0.5)),
     ]
     assert all(run_fingerprint(variant) != baseline for variant in variants)
-    monkeypatch.setattr(runs_module, "WARMUP_FRACTION", 0.5)
-    assert run_fingerprint(base) != baseline, "a schedule constant must change the fingerprint"
 
 
 def test_specification_hash_is_over_the_whole_dictionary():
@@ -92,7 +92,7 @@ def test_specification_hash_is_over_the_whole_dictionary():
     baseline = fingerprint_specification(specification)
     specification["architecture"]["init_std"] = 0.05
     assert fingerprint_specification(specification) != baseline
-    specification["architecture"]["init_std"] = runs_module.INIT_STD
+    specification["architecture"]["init_std"] = INIT_STD
     assert fingerprint_specification(specification) == baseline
 
 
@@ -115,17 +115,25 @@ def test_train_or_load_rejects_rebuilt_corpus(saved_run, monkeypatch):
         train_or_load(run_config, paths)
 
 
-def test_train_or_load_rejects_changed_architecture_constant(saved_run, monkeypatch):
+def test_train_or_load_rejects_changed_architecture_default(saved_run, monkeypatch):
+    @dataclass(frozen=True)
+    class ChangedGPTConfig(GPTConfig):
+        layer_norm_eps: float = 1e-6
+
     run_config, paths = saved_run
-    monkeypatch.setattr(runs_module, "LAYER_NORM_EPS", 1e-6)
+    monkeypatch.setattr(runs_module, "GPTConfig", ChangedGPTConfig)
     with pytest.raises(StaleRunError, match="changed: \\['architecture'\\]"):
         train_or_load(run_config, paths)
 
 
 def test_load_run_by_name_applies_the_same_check(saved_run, monkeypatch):
+    @dataclass(frozen=True)
+    class ChangedTrainingConfig(TrainingConfig):
+        kaplan_lr_slope: float = 0.0
+
     run_config, paths = saved_run
     assert load_run(run_config.run_name, paths).run_fingerprint == run_fingerprint(run_config)
-    monkeypatch.setattr(runs_module, "KAPLAN_LR_SLOPE", 0.0)
+    monkeypatch.setattr(runs_module, "TrainingConfig", ChangedTrainingConfig)
     with pytest.raises(StaleRunError, match="changed: \\['schedule'\\]"):
         load_run(run_config.run_name, paths)
 
