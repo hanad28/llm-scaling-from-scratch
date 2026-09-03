@@ -31,15 +31,18 @@ def sinusoidal_table(context_length: int, d_model: int, frequency_base: float) -
 
 
 class LearnedPositionalEmbedding(nn.Module):
-    """One trainable vector per position, as in GPT-2."""
+    """One trainable vector per position, as in GPT-2.
+
+    The table is allocated empty and initialised by `GPT`, after every other parameter,
+    so constructing it draws nothing from the random number generator.
+    """
 
     def __init__(self, context_length: int, d_model: int) -> None:
         super().__init__()
-        self.embedding = nn.Embedding(context_length, d_model)
+        self.table = nn.Parameter(torch.empty(context_length, d_model))
 
     def forward(self, sequence_length: int) -> Tensor:
-        positions = torch.arange(sequence_length, device=self.embedding.weight.device)
-        return self.embedding(positions)
+        return self.table[:sequence_length]
 
 
 class SinusoidalPositionalEncoding(nn.Module):

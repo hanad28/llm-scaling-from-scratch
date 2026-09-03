@@ -34,9 +34,11 @@ def test_sinusoidal_module_slices_to_sequence_length_and_has_no_parameters():
 
 def test_learned_embedding_returns_one_vector_per_position():
     embedding = LearnedPositionalEmbedding(CONTEXT, D_MODEL)
+    torch.nn.init.normal_(embedding.table)
     output = embedding(7)
     assert output.shape == (7, D_MODEL)
-    assert torch.equal(output[3], embedding.embedding.weight[3])
+    assert torch.equal(output[3], embedding.table[3])
+    assert embedding.table.requires_grad
 
 
 def test_rotary_preserves_vector_norms():

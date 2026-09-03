@@ -201,6 +201,10 @@ class GPT(nn.Module):
         self.lm_head.weight = self.token_embedding.weight
         self.apply(self._init_weights)
         self._scale_residual_projections()
+        # Drawn last, so for a given seed every parameter the positional schemes share is
+        # bitwise identical across schemes; the ablation's seed pairing relies on this.
+        if isinstance(self.positional, LearnedPositionalEmbedding):
+            nn.init.normal_(self.positional.table, mean=0.0, std=config.init_std)
 
     def _init_weights(self, module: nn.Module) -> None:
         if isinstance(module, nn.Linear):
@@ -247,7 +251,7 @@ class GPT(nn.Module):
         total = sum(parameter.numel() for parameter in self.parameters())
         embedding = self.token_embedding.weight.numel()
         if isinstance(self.positional, LearnedPositionalEmbedding):
-            embedding += self.positional.embedding.weight.numel()
+            embedding += self.positional.table.numel()
         return {"total": total, "embedding": embedding, "non_embedding": total - embedding}
 
     @torch.no_grad()

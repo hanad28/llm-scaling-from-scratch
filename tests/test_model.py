@@ -77,6 +77,39 @@ def test_forward_returns_logits_and_loss():
     assert loss is not None and loss.ndim == 0 and loss.item() > 0
 
 
+def seeded_state_dict(scheme: str, seed: int) -> dict[str, torch.Tensor]:
+    torch.manual_seed(seed)
+    config = GPTConfig(
+        n_layer=2, d_model=32, n_head=4, vocab_size=64, context_length=16, positional_scheme=scheme
+    )
+    return GPT(config).state_dict()
+
+
+@pytest.mark.parametrize("alternative", ["rope", "sinusoidal"])
+def test_same_seed_gives_identical_shared_parameters_across_positional_schemes(alternative):
+    """The ablation pairs runs by seed, which only means something if the seed fixes the
+    initial weights of everything the two schemes share, not just the data order."""
+    learned = seeded_state_dict("learned", seed=3)
+    other = seeded_state_dict(alternative, seed=3)
+    shared = learned.keys() & other.keys()
+    assert shared, "no shared parameters to compare"
+    differing = sorted(name for name in shared if not torch.equal(learned[name], other[name]))
+    assert differing == [], f"shared parameters differ between schemes: {differing}"
+    assert seeded_state_dict("learned", seed=4).keys() == learned.keys()
+    assert not torch.equal(
+        seeded_state_dict("learned", seed=4)["blocks.0.mlp.expand.weight"],
+        learned["blocks.0.mlp.expand.weight"],
+    )
+
+
+def test_learned_position_table_is_initialised_like_the_other_embeddings():
+    torch.manual_seed(0)
+    model = GPT(SMALL_CONFIG)
+    table = model.positional.table
+    assert table.requires_grad
+    assert table.std().item() == pytest.approx(SMALL_CONFIG.init_std, rel=0.2)
+
+
 def test_weight_tying_and_parameter_counts():
     model = GPT(SMALL_CONFIG)
     assert model.lm_head.weight.data_ptr() == model.token_embedding.weight.data_ptr()
