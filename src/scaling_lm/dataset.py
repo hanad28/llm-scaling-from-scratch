@@ -15,12 +15,14 @@ from torch import Tensor
 
 from scaling_lm.config import CONTEXT_LENGTH
 from scaling_lm.tokenizer import load_tokens
+from scaling_lm.validation import require_non_negative, require_positive
 
 
 class TokenWindows:
     """Random access to (input, target) windows over a memory-mapped token stream."""
 
     def __init__(self, split_name: str, context_length: int = CONTEXT_LENGTH) -> None:
+        require_positive("context_length", context_length)
         self.tokens = load_tokens(split_name)
         self.context_length = context_length
         # The target of the final window needs one extra token, hence the -1.
@@ -42,6 +44,8 @@ class TokenWindows:
 
 def epoch_batches(windows: TokenWindows, batch_size: int, seed: int) -> Iterator[np.ndarray]:
     """Yield window-index arrays covering one shuffled pass, dropping the final partial batch."""
+    require_positive("batch_size", batch_size)
+    require_non_negative("seed", seed)
     generator = np.random.default_rng(seed)
     permutation = generator.permutation(len(windows))
     full_batches = len(windows) // batch_size
@@ -50,10 +54,12 @@ def epoch_batches(windows: TokenWindows, batch_size: int, seed: int) -> Iterator
 
 
 def steps_per_epoch(windows: TokenWindows, batch_size: int) -> int:
+    require_positive("batch_size", batch_size)
     return len(windows) // batch_size
 
 
 def sequential_batches(windows: TokenWindows, batch_size: int) -> Iterator[np.ndarray]:
     """Yield window indices in order, including a final partial batch (used for evaluation)."""
+    require_positive("batch_size", batch_size)
     for start in range(0, len(windows), batch_size):
         yield np.arange(start, min(start + batch_size, len(windows)))

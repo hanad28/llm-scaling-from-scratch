@@ -33,6 +33,7 @@ from scaling_lm.config import (
     VOCAB_SIZE,
 )
 from scaling_lm.data import Document, read_split, split_path
+from scaling_lm.validation import require_positive
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,10 @@ FINGERPRINT_CHUNK_BYTES = 1 << 24
 
 def train_tokenizer(texts: Iterable[str], vocab_size: int = VOCAB_SIZE) -> Tokenizer:
     """Train a GPT-2 style byte-level BPE tokenizer with a single special end-of-text token."""
+    # The byte alphabet plus EOS must fit, otherwise the trainer cannot produce a valid vocabulary.
+    minimum_vocab = len(pre_tokenizers.ByteLevel.alphabet()) + 1
+    if vocab_size < minimum_vocab:
+        raise ValueError(f"vocab_size must be at least {minimum_vocab}, got {vocab_size}")
     tokenizer = Tokenizer(models.BPE())
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tokenizer.decoder = decoders.ByteLevel()
@@ -107,6 +112,7 @@ def corpus_fingerprint() -> str:
 
 
 def training_texts(limit: int) -> Iterator[str]:
+    require_positive("limit", limit)
     for document in itertools.islice(read_split(split_path("train")), limit):
         yield document.text
 

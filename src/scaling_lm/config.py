@@ -8,6 +8,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from scaling_lm.validation import (
+    require_non_negative,
+    require_positive,
+    require_unit_interval,
+)
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -168,6 +174,19 @@ class TrainingConfig:
     # Set to cap the number of training steps (used for smoke tests only).
     max_steps: int | None = None
 
+    def __post_init__(self) -> None:
+        require_positive("batch_size_sequences", self.batch_size_sequences)
+        require_positive("gradient_accumulation_steps", self.gradient_accumulation_steps)
+        require_positive("eval_interval_steps", self.eval_interval_steps)
+        require_positive("eval_batches_periodic", self.eval_batches_periodic)
+        require_positive("log_interval_steps", self.log_interval_steps)
+        require_positive("grad_clip_norm", self.grad_clip_norm)
+        require_non_negative("weight_decay", self.weight_decay)
+        require_unit_interval("adam_beta1", self.adam_beta1)
+        require_unit_interval("adam_beta2", self.adam_beta2)
+        if self.max_steps is not None:
+            require_positive("max_steps", self.max_steps)
+
     @property
     def tokens_per_step(self) -> int:
         return self.batch_size_sequences * self.gradient_accumulation_steps * CONTEXT_LENGTH
@@ -205,6 +224,19 @@ class RunConfig:
     positional_scheme: str = DEFAULT_POSITIONAL_SCHEME
     seed: int = 0
     training: TrainingConfig = field(default_factory=TrainingConfig)
+
+    def __post_init__(self) -> None:
+        if self.model_size not in MODEL_SIZES_BY_NAME:
+            raise ValueError(
+                f"unknown model size {self.model_size!r}, expected one of "
+                f"{sorted(MODEL_SIZES_BY_NAME)}"
+            )
+        if self.positional_scheme not in POSITIONAL_SCHEMES:
+            raise ValueError(
+                f"unknown positional scheme {self.positional_scheme!r}, expected one of "
+                f"{list(POSITIONAL_SCHEMES)}"
+            )
+        require_non_negative("seed", self.seed)
 
     @property
     def run_name(self) -> str:

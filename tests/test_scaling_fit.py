@@ -49,6 +49,27 @@ def test_rejects_non_finite_losses(bad_loss):
         fit_power_law(PARAMETER_COUNTS, losses)
 
 
+@pytest.mark.parametrize("resamples", [0, -5])
+def test_rejects_degenerate_bootstrap_resamples(resamples):
+    losses = 10.0 * PARAMETER_COUNTS**-0.08
+    with pytest.raises(ValueError, match="bootstrap_resamples must be positive"):
+        fit_power_law(PARAMETER_COUNTS, losses, bootstrap_resamples=resamples)
+
+
+def test_rejects_repeated_parameter_counts():
+    counts = np.array([1e6, 1e7, 1e7, 1e8])
+    losses = np.array([4.0, 3.5, 3.4, 3.0])
+    with pytest.raises(ValueError, match="distinct"):
+        fit_power_law(counts, losses)
+
+
+@pytest.mark.parametrize("confidence_level", [0.0, 1.0, 1.5, float("nan")])
+def test_rejects_confidence_level_outside_unit_interval(confidence_level):
+    losses = 10.0 * PARAMETER_COUNTS**-0.08
+    with pytest.raises(ValueError, match="confidence_level"):
+        fit_power_law(PARAMETER_COUNTS, losses, confidence_level=confidence_level)
+
+
 def test_to_dict_is_json_friendly():
     losses = 10.0 * PARAMETER_COUNTS**-0.08
     payload = fit_power_law(PARAMETER_COUNTS, losses, bootstrap_resamples=100).to_dict()

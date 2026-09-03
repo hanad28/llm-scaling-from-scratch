@@ -25,13 +25,10 @@ from scaling_lm.config import (
     RunConfig,
     TrainingConfig,
 )
+from scaling_lm.runs import RunResult
 from scaling_lm.sweep import summarise_run
-from scaling_lm.train import (
-    RunResult,
-    add_training_arguments,
-    train_or_load,
-    training_config_from_args,
-)
+from scaling_lm.train import add_training_arguments, train_or_load, training_config_from_args
+from scaling_lm.validation import non_negative_int, require_unique
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +95,7 @@ def run_ablation(
     model_size: str = ABLATION_MODEL_SIZE,
 ) -> dict[str, object]:
     """Train every (scheme, seed) pair and write results/positional_ablation.json."""
+    require_unique("seeds", list(seeds))
     per_scheme: dict[str, list[RunResult]] = {}
     for scheme in ABLATION_POSITIONAL_SCHEMES:
         for seed in seeds:
@@ -126,7 +124,7 @@ def run_ablation(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--seeds", nargs="+", type=int, default=list(ABLATION_SEEDS))
+    parser.add_argument("--seeds", nargs="+", type=non_negative_int, default=list(ABLATION_SEEDS))
     parser.add_argument(
         "--model-size",
         default=ABLATION_MODEL_SIZE,

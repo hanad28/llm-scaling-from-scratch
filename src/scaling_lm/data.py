@@ -35,6 +35,7 @@ from scaling_lm.config import (
     SPLIT_NAMES,
     TARGET_CATEGORIES,
 )
+from scaling_lm.validation import positive_int
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,10 @@ class Document:
 
 def download_shards(shard_count: int) -> list[Path]:
     """Fetch the first `shard_count` parquet shards at the pinned dataset revision."""
+    if not 1 <= shard_count <= HF_PARQUET_SHARD_COUNT:
+        raise ValueError(
+            f"shard_count must be between 1 and {HF_PARQUET_SHARD_COUNT}, got {shard_count}"
+        )
     paths = []
     for index in range(shard_count):
         filename = HF_PARQUET_SHARD_PATTERN.format(index=index)
@@ -192,8 +197,8 @@ def build_corpus(shard_count: int, max_documents: int | None) -> dict[str, int]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--shards", type=int, default=HF_PARQUET_SHARD_COUNT)
-    parser.add_argument("--max-documents", type=int, default=None)
+    parser.add_argument("--shards", type=positive_int, default=HF_PARQUET_SHARD_COUNT)
+    parser.add_argument("--max-documents", type=positive_int, default=None)
     return parser.parse_args()
 
 

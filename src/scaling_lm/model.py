@@ -28,6 +28,7 @@ from scaling_lm.positional import (
     RotaryPositionalEncoding,
     SinusoidalPositionalEncoding,
 )
+from scaling_lm.validation import require_positive
 
 # GPT-2 initialisation scale (Radford et al., 2019).
 INIT_STD = 0.02
@@ -47,6 +48,12 @@ class GPTConfig:
     positional_scheme: str = DEFAULT_POSITIONAL_SCHEME
 
     def __post_init__(self) -> None:
+        require_positive("n_layer", self.n_layer)
+        require_positive("d_model", self.d_model)
+        require_positive("n_head", self.n_head)
+        require_positive("vocab_size", self.vocab_size)
+        require_positive("context_length", self.context_length)
+        require_positive("mlp_expansion", self.mlp_expansion)
         if self.d_model % self.n_head != 0:
             raise ValueError("d_model must be divisible by n_head")
         if self.positional_scheme not in POSITIONAL_SCHEMES:

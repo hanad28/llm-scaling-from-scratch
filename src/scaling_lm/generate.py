@@ -22,6 +22,7 @@ from scaling_lm.config import (
 from scaling_lm.model import GPT
 from scaling_lm.tokenizer import load_tokenizer
 from scaling_lm.train import load_model, select_device
+from scaling_lm.validation import require_positive, require_unique
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,11 @@ GENERATION_SEED = 1234
 def generate_continuation(
     model: GPT, prompt: str, device: torch.device, max_new_tokens: int = GENERATION_MAX_NEW_TOKENS
 ) -> str:
+    require_positive("max_new_tokens", max_new_tokens)
+    require_positive("GENERATION_TEMPERATURE", GENERATION_TEMPERATURE)
+    require_positive("GENERATION_TOP_K", GENERATION_TOP_K)
+    if not prompt:
+        raise ValueError("prompt must not be empty")
     tokenizer = load_tokenizer()
     prompt_ids = torch.tensor([tokenizer.encode(prompt).ids], dtype=torch.long, device=device)
     output_ids = model.generate(
@@ -44,6 +50,7 @@ def generate_continuation(
 
 def generate_for_runs(run_names: list[str], paths: ResultsPaths) -> dict[str, dict[str, str]]:
     """Return {run_name: {prompt: continuation}} and write it to results/generations.json."""
+    require_unique("run_names", run_names)
     device = select_device()
     samples: dict[str, dict[str, str]] = {}
     for run_name in run_names:
