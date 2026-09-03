@@ -42,12 +42,10 @@ from scaling_lm.config import ResultsPaths, RunConfig, TrainingConfig
 run_config = RunConfig("tiny", "rope", 0, TrainingConfig(max_steps=4))
 paths = ResultsPaths(Path({results!r}))
 if {action!r} == "save":
-    specification = runs.run_specification(run_config)
     result = runs.RunResult(
         run_name=run_config.run_name, model_size="tiny", positional_scheme="rope", seed=0,
         parameters={{"total": 1, "embedding": 1, "non_embedding": 1}},
-        specification=specification,
-        run_fingerprint=runs.fingerprint_specification(specification),
+        identity=runs.run_identity(run_config),
         total_steps=1, tokens_seen=1, peak_learning_rate=1e-3,
         final_validation_loss=3.0, final_test_loss=3.0, wall_time_seconds=1.0, device="cpu",
     )
@@ -166,7 +164,7 @@ def test_training_path_modules_keep_no_literal_constants(module):
 def test_specification_is_exactly_the_resolved_configs(monkeypatch):
     monkeypatch.setattr(runs_module, "corpus_fingerprint", lambda: STUB_CORPUS_FINGERPRINT)
     run_config = RunConfig("small", "learned", 3, TrainingConfig(max_steps=2))
-    specification = runs_module.run_specification(run_config)
+    specification = runs_module.run_identity(run_config).specification
     model = GPTConfig.from_model_size(MODEL_SIZES_BY_NAME["small"], "learned")
     assert specification["architecture"] == asdict(model)
     assert specification["schedule"] == {**asdict(run_config.training), "seed": 3}

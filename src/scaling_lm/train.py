@@ -6,6 +6,8 @@ Run one configuration directly with:
 
 A run whose result.json already exists is loaded rather than retrained, provided
 `runs.resolve_run` accepts it as the same run (same corpus, architecture and schedule).
+Artefacts are written to a temporary file and renamed into place, so a save interrupted
+by a lost session never leaves a half-written model.pt or result.json behind.
 """
 
 from __future__ import annotations
@@ -36,10 +38,10 @@ from scaling_lm.runs import (
     RESULT_FILENAME,
     EvalPoint,
     RunResult,
-    fingerprint_specification,
     load_run,
     resolve_run,
-    run_specification,
+    run_identity,
+    write_atomically,
 )
 from scaling_lm.validation import non_negative_int, positive_int
 
@@ -169,7 +171,7 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
     # torch.compile wraps the module; keep the raw model for parameter counts and saving.
     forward_model: nn.Module = torch.compile(model) if config.compile_model else model
 
-    specification = run_specification(run_config)
+    identity = run_identity(run_config)
     train_windows = TokenWindows("train")
     validation_windows = TokenWindows("validation")
     test_windows = TokenWindows("test")
@@ -255,8 +257,7 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
         positional_scheme=run_config.positional_scheme,
         seed=run_config.seed,
         parameters=parameter_counts,
-        specification=specification,
-        run_fingerprint=fingerprint_specification(specification),
+        identity=identity,
         total_steps=total_steps,
         tokens_seen=total_steps * config.tokens_per_step,
         peak_learning_rate=peak_lr,
@@ -271,8 +272,14 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
 
 
 def save_run(model: GPT, result: RunResult, output_dir: Path) -> None:
-    torch.save(model.state_dict(), output_dir / CHECKPOINT_FILENAME)
-    (output_dir / RESULT_FILENAME).write_text(json.dumps(asdict(result), indent=2))
+    """Persist the checkpoint, then the result. The result is what marks a run finished."""
+    write_atomically(
+        output_dir / CHECKPOINT_FILENAME, lambda path: torch.save(model.state_dict(), path)
+    )
+    write_atomically(
+        output_dir / RESULT_FILENAME,
+        lambda path: path.write_text(json.dumps(asdict(result), indent=2)),
+    )
 
 
 def train_or_load(run_config: RunConfig, paths: ResultsPaths) -> RunResult:

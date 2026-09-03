@@ -14,12 +14,11 @@ from scaling_lm.runs import (
     RESULT_FILENAME,
     RunResult,
     StaleRunError,
-    fingerprint_specification,
+    hash_specification,
     load_run,
-    run_fingerprint,
-    run_specification,
+    run_identity,
 )
-from scaling_lm.sweep import summarise_run
+from scaling_lm.sweep import write_sweep_manifest
 from scaling_lm.train import train_or_load
 
 CORPUS_FINGERPRINT = "a" * 64
@@ -33,15 +32,13 @@ def stub_corpus(monkeypatch):
 
 
 def make_result(run_config: RunConfig, validation_loss: float = 3.0) -> RunResult:
-    specification = run_specification(run_config)
     return RunResult(
         run_name=run_config.run_name,
         model_size=run_config.model_size,
         positional_scheme=run_config.positional_scheme,
         seed=run_config.seed,
         parameters={"total": 1, "embedding": 1, "non_embedding": 1},
-        specification=specification,
-        run_fingerprint=fingerprint_specification(specification),
+        identity=run_identity(run_config),
         total_steps=1,
         tokens_seen=1,
         peak_learning_rate=1e-3,
@@ -75,8 +72,8 @@ def saved_run(tmp_path, monkeypatch):
 def test_fingerprint_covers_corpus_architecture_and_schedule():
     training = TrainingConfig(max_steps=4)
     base = RunConfig("tiny", "learned", 0, training)
-    baseline = run_fingerprint(base)
-    assert run_fingerprint(base) == baseline
+    baseline = run_identity(base).fingerprint
+    assert run_identity(base).fingerprint == baseline
     variants = [
         RunConfig("tiny", "rope", 0, training),
         RunConfig("tiny", "learned", 1, training),
@@ -84,16 +81,17 @@ def test_fingerprint_covers_corpus_architecture_and_schedule():
         RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4, weight_decay=0)),
         RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4, warmup_fraction=0.5)),
     ]
-    assert all(run_fingerprint(variant) != baseline for variant in variants)
+    assert all(run_identity(variant).fingerprint != baseline for variant in variants)
 
 
 def test_specification_hash_is_over_the_whole_dictionary():
-    specification = run_specification(RunConfig("tiny", "learned", 0, TrainingConfig()))
-    baseline = fingerprint_specification(specification)
+    identity = run_identity(RunConfig("tiny", "learned", 0, TrainingConfig()))
+    specification = identity.specification
+    assert hash_specification(specification) == identity.fingerprint
     specification["architecture"]["init_std"] = 0.05
-    assert fingerprint_specification(specification) != baseline
+    assert hash_specification(specification) != identity.fingerprint
     specification["architecture"]["init_std"] = INIT_STD
-    assert fingerprint_specification(specification) == baseline
+    assert hash_specification(specification) == identity.fingerprint
 
 
 def test_train_or_load_reuses_matching_run(saved_run):
@@ -132,7 +130,7 @@ def test_load_run_by_name_applies_the_same_check(saved_run, monkeypatch):
         kaplan_lr_slope: float = 0.0
 
     run_config, paths = saved_run
-    assert load_run(run_config.run_name, paths).run_fingerprint == run_fingerprint(run_config)
+    assert load_run(run_config.run_name, paths).identity == run_identity(run_config)
     monkeypatch.setattr(runs_module, "TrainingConfig", ChangedTrainingConfig)
     with pytest.raises(StaleRunError, match="changed: \\['schedule'\\]"):
         load_run(run_config.run_name, paths)
@@ -142,7 +140,7 @@ def test_load_run_rejects_edited_result_file(saved_run):
     run_config, paths = saved_run
     result_file = paths.run_directory(run_config.run_name) / RESULT_FILENAME
     payload = json.loads(result_file.read_text())
-    payload["specification"]["schedule"]["max_steps"] = 8
+    payload["identity"]["specification"]["schedule"]["max_steps"] = 8
     result_file.write_text(json.dumps(payload))
     with pytest.raises(StaleRunError, match="edited after training"):
         load_run(run_config.run_name, paths)
@@ -152,15 +150,15 @@ def test_report_loads_runs_through_the_shared_check(tmp_path, monkeypatch):
     paths = ResultsPaths(tmp_path)
     sizes = ["tiny", "small", "medium"]
     losses = [4.0, 3.5, 3.2]
-    summaries = []
+    results = []
     for size, loss in zip(sizes, losses, strict=True):
         result = make_result(RunConfig(size, "learned", 0, TrainingConfig(max_steps=4)), loss)
         result.parameters["non_embedding"] = {"tiny": 1_000, "small": 10_000, "medium": 100_000}[
             size
         ]
         write_result(result, paths)
-        summaries.append(summarise_run(result))
-    paths.sweep_summary.write_text(json.dumps(summaries))
+        results.append(result)
+    write_sweep_manifest(results, paths)
     monkeypatch.setattr(runs_module, "corpus_fingerprint", lambda: REBUILT_CORPUS_FINGERPRINT)
     with pytest.raises(StaleRunError, match="changed: \\['corpus'\\]"):
         build_report(paths, title="test")
@@ -190,8 +188,10 @@ def test_compare_schemes_uses_paired_test_on_matched_seeds():
     assert comparison["mean_difference"] == pytest.approx(-0.16 / 3)
     assert comparison["paired_t_statistic"] == pytest.approx(float(expected.statistic))
     assert comparison["paired_p_value"] == pytest.approx(float(expected.pvalue))
-    independent = stats.ttest_ind(rope_losses, learned_losses, equal_var=False)
-    assert comparison["paired_p_value"] != pytest.approx(float(independent.pvalue))
+    welch = stats.ttest_ind(rope_losses, learned_losses, equal_var=False)
+    assert comparison["welch_t_statistic"] == pytest.approx(float(welch.statistic))
+    assert comparison["welch_p_value"] == pytest.approx(float(welch.pvalue))
+    assert comparison["paired_p_value"] != pytest.approx(float(welch.pvalue))
 
 
 def test_compare_schemes_requires_matched_seeds():

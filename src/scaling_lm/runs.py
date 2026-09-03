@@ -1,15 +1,17 @@
 """Run identity and the single place that decides whether a saved result may be reused.
 
-A run is identified by a fingerprint over everything that determines its result: the
-corpus (token files), the resolved GPTConfig and the resolved TrainingConfig plus seed.
-The fingerprint is a hash of that whole specification. There is no list of constants to
-maintain here: the model and training code read every tunable from those two config
-objects (tests/test_constant_staleness.py enforces this), so a constant is part of the
-fingerprint by construction.
+`run_identity` is the only function that says what a run is: a specification covering
+everything that determines its result (the corpus token files, the resolved GPTConfig,
+the resolved TrainingConfig plus seed) and the SHA-256 of that whole specification.
+Training records its output verbatim in result.json; `verify_result` recomputes it and
+compares. There is no list of constants to maintain: the model and training code read
+every tunable from the two config objects (tests/test_constant_staleness.py enforces
+this), so a constant is part of the identity by construction, and nothing outside this
+module assembles or hashes a specification (tests/test_single_source.py enforces that).
 
-Every reader of a result.json goes through `verify_result`, via either
-`resolve_run` (a requested RunConfig, used before training) or `load_run` (a run
-name, used by report and generate). There is no other loading path.
+Every reader of a result.json goes through `verify_result`, via either `resolve_run`
+(a requested RunConfig, used before training) or `load_run` (a run name, used by report
+and generate). Losses are read from the RunResult those return and from nowhere else.
 """
 
 from __future__ import annotations
@@ -17,7 +19,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 from scaling_lm.config import MODEL_SIZES_BY_NAME, ResultsPaths, RunConfig, TrainingConfig
 from scaling_lm.model import GPTConfig
@@ -27,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 CHECKPOINT_FILENAME = "model.pt"
 RESULT_FILENAME = "result.json"
+PARTIAL_WRITE_SUFFIX = ".partial"
 FINGERPRINT_PREVIEW_CHARS = 12
 
 
@@ -39,12 +45,21 @@ class EvalPoint:
     learning_rate: float
 
 
+@dataclass(frozen=True)
+class RunIdentity:
+    """What a run is: its resolved specification and the fingerprint (hash) of it."""
+
+    specification: dict[str, object]
+    fingerprint: str
+
+
 @dataclass
 class RunResult:
     """Everything recorded about a finished run, written to results/runs/<run_name>/result.json.
 
-    `specification` is the output of `run_specification` at training time and
-    `run_fingerprint` its hash; together they are the only record of what was trained.
+    `identity` is `run_identity(run_config)` as computed when training started; it is the
+    only record of what was trained. `final_validation_loss` and `final_test_loss` here
+    are the only place a loss is read from.
     """
 
     run_name: str
@@ -52,8 +67,7 @@ class RunResult:
     positional_scheme: str
     seed: int
     parameters: dict[str, int]
-    specification: dict[str, object]
-    run_fingerprint: str
+    identity: RunIdentity
     total_steps: int
     tokens_seen: int
     peak_learning_rate: float
@@ -68,24 +82,26 @@ class StaleRunError(RuntimeError):
     """A result.json exists for the run name but was produced by a different run."""
 
 
-def run_specification(run_config: RunConfig) -> dict[str, object]:
-    """Everything that determines a run's result, resolved to plain JSON-friendly values."""
-    size = MODEL_SIZES_BY_NAME[run_config.model_size]
-    model = GPTConfig.from_model_size(size, run_config.positional_scheme)
-    return {
-        "corpus": corpus_fingerprint(),
-        "architecture": asdict(model),
-        "schedule": {**asdict(run_config.training), "seed": run_config.seed},
-    }
-
-
-def fingerprint_specification(specification: dict[str, object]) -> str:
+def hash_specification(specification: dict[str, object]) -> str:
     canonical = json.dumps(specification, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def run_fingerprint(run_config: RunConfig) -> str:
-    return fingerprint_specification(run_specification(run_config))
+def run_identity(run_config: RunConfig) -> RunIdentity:
+    """The one assembly of everything that determines a run's result, and its fingerprint.
+
+    The corpus enters as `corpus_fingerprint()`, a hash of the token files kept in
+    tokenizer.py because it describes the data, not a run; it is an input here, not a
+    second identity. Architecture and schedule are `asdict()` of the resolved configs.
+    """
+    size = MODEL_SIZES_BY_NAME[run_config.model_size]
+    model = GPTConfig.from_model_size(size, run_config.positional_scheme)
+    specification: dict[str, object] = {
+        "corpus": corpus_fingerprint(),
+        "architecture": asdict(model),
+        "schedule": {**asdict(run_config.training), "seed": run_config.seed},
+    }
+    return RunIdentity(specification, hash_specification(specification))
 
 
 def run_config_of(result: RunResult) -> RunConfig:
@@ -95,7 +111,7 @@ def run_config_of(result: RunResult) -> RunConfig:
     field comes from the current code, so checking the rebuilt request against the record
     catches a changed constant just as `resolve_run` does for a fresh request.
     """
-    schedule = result.specification["schedule"]
+    schedule = result.identity.specification["schedule"]
     if not isinstance(schedule, dict):
         raise StaleRunError(f"{result.run_name}: result.json has no schedule section")
     option_names = TrainingConfig.cli_option_names()
@@ -115,10 +131,27 @@ def result_path(run_name: str, paths: ResultsPaths) -> str:
     return str(paths.run_directory(run_name) / RESULT_FILENAME)
 
 
+def write_atomically(final_path: Path, write: Callable[[Path], None]) -> None:
+    """Run `write` against a temporary sibling of `final_path`, then rename it into place.
+
+    The rename is atomic on POSIX, so `final_path` is either absent (or its previous
+    content) or complete; a process killed mid-write leaves only the `.partial` file,
+    which the next save overwrites. A run directory is only ever written by one process.
+    """
+    partial_path = final_path.with_name(final_path.name + PARTIAL_WRITE_SUFFIX)
+    try:
+        write(partial_path)
+        os.replace(partial_path, final_path)
+    except BaseException:
+        partial_path.unlink(missing_ok=True)
+        raise
+
+
 def read_result(run_name: str, paths: ResultsPaths) -> RunResult:
     """Parse a result.json without checking it. Only `verify_result` callers should use this."""
     payload = json.loads((paths.run_directory(run_name) / RESULT_FILENAME).read_text())
     payload["history"] = [EvalPoint(**point) for point in payload["history"]]
+    payload["identity"] = RunIdentity(**payload["identity"])
     return RunResult(**payload)
 
 
@@ -139,20 +172,20 @@ def verify_result(result: RunResult, run_config: RunConfig, paths: ResultsPaths)
             f"{result_path(run_config.run_name, paths)} records run {result.run_name!r}, "
             f"not {run_config.run_name!r}"
         )
-    if fingerprint_specification(result.specification) != result.run_fingerprint:
+    recorded = result.identity
+    if hash_specification(recorded.specification) != recorded.fingerprint:
         raise StaleRunError(
             f"{result_path(run_config.run_name, paths)} records a specification that does not "
             "hash to its own fingerprint; the file was edited after training. "
             "Delete the run directory or use another --results-dir"
         )
-    current_specification = run_specification(run_config)
-    current_fingerprint = fingerprint_specification(current_specification)
-    if result.run_fingerprint != current_fingerprint:
-        sections = changed_sections(result.specification, current_specification)
+    current = run_identity(run_config)
+    if recorded != current:
+        sections = changed_sections(recorded.specification, current.specification)
         raise StaleRunError(
             f"{result_path(run_config.run_name, paths)} was produced by a different run: "
-            f"fingerprint {result.run_fingerprint[:FINGERPRINT_PREVIEW_CHARS]} recorded, "
-            f"{current_fingerprint[:FINGERPRINT_PREVIEW_CHARS]} now; changed: {sections}. "
+            f"fingerprint {recorded.fingerprint[:FINGERPRINT_PREVIEW_CHARS]} recorded, "
+            f"{current.fingerprint[:FINGERPRINT_PREVIEW_CHARS]} now; changed: {sections}. "
             "Delete the run directory or use another --results-dir"
         )
     return result
