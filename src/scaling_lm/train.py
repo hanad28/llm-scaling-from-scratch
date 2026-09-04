@@ -188,7 +188,11 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
 
     optimizer = build_optimizer(model, peak_lr, config)
     batch_iterator = epoch_batches(
-        train_windows, config.batch_size_sequences, run_config.seed, run_config.epochs
+        train_windows,
+        config.batch_size_sequences,
+        run_config.seed,
+        run_config.epochs,
+        micro_batches_per_step(config),
     )
     epoch_length = steps_per_epoch(len(train_windows), config)
     history: list[EvalPoint] = []
