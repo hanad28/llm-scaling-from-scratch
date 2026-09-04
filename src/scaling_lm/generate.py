@@ -20,9 +20,10 @@ from scaling_lm.config import (
     ResultsPaths,
 )
 from scaling_lm.model import GPT
+from scaling_lm.runs import select_device
 from scaling_lm.sweep import read_sweep_manifest
 from scaling_lm.tokenizer import load_tokenizer
-from scaling_lm.train import load_model, select_device
+from scaling_lm.train import load_model
 from scaling_lm.validation import require_positive, require_unique
 
 logger = logging.getLogger(__name__)

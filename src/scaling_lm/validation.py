@@ -45,6 +45,12 @@ def require_unit_interval(name: str, value: float) -> None:
         raise ValueError(f"{name} must lie strictly between 0 and 1, got {value}")
 
 
+def require_fraction(name: str, value: float) -> None:
+    """In [0, 1] inclusive, as for a fraction of a peak value."""
+    if not 0 <= value <= 1:
+        raise ValueError(f"{name} must lie between 0 and 1 inclusive, got {value}")
+
+
 def require_unique(name: str, values: Sequence[Item]) -> None:
     if not values:
         raise ValueError(f"{name} must not be empty")

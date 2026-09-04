@@ -2,6 +2,7 @@ import json
 from dataclasses import asdict, dataclass
 
 import pytest
+import torch
 from scipy import stats
 
 from scaling_lm import runs as runs_module
@@ -82,6 +83,43 @@ def test_fingerprint_covers_corpus_architecture_and_schedule():
         RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4, warmup_fraction=0.5)),
     ]
     assert all(run_identity(variant).fingerprint != baseline for variant in variants)
+
+
+def pretend_to_be_an_a40(monkeypatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _device=None: "NVIDIA A40")
+
+
+def test_fingerprint_covers_torch_version_and_device(monkeypatch):
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4))
+    baseline = run_identity(run_config)
+    assert baseline.specification["environment"] == {
+        "torch_version": torch.__version__,
+        "device": "cpu",
+    }
+    with pytest.MonkeyPatch.context() as other_version:
+        other_version.setattr(torch, "__version__", "0.0.0+changed")
+        assert run_identity(run_config).fingerprint != baseline.fingerprint
+    pretend_to_be_an_a40(monkeypatch)
+    on_gpu = run_identity(run_config)
+    assert on_gpu.specification["environment"]["device"] == "cuda:NVIDIA A40"
+    assert on_gpu.fingerprint != baseline.fingerprint
+
+
+def test_cpu_smoke_result_is_not_reused_on_a_gpu(saved_run, monkeypatch):
+    run_config, paths = saved_run
+    pretend_to_be_an_a40(monkeypatch)
+    with pytest.raises(StaleRunError, match="changed: \\['environment'\\]"):
+        train_or_load(run_config, paths)
+    with pytest.raises(StaleRunError, match="changed: \\['environment'\\]"):
+        load_run(run_config.run_name, paths)
+
+
+def test_result_from_another_torch_version_is_not_reused(saved_run, monkeypatch):
+    run_config, paths = saved_run
+    monkeypatch.setattr(torch, "__version__", "0.0.0+changed")
+    with pytest.raises(StaleRunError, match="changed: \\['environment'\\]"):
+        train_or_load(run_config, paths)
 
 
 def test_specification_hash_is_over_the_whole_dictionary():

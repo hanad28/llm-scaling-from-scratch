@@ -1,4 +1,5 @@
 import argparse
+import itertools
 
 import numpy as np
 import pytest
@@ -75,11 +76,23 @@ def test_download_shards_rejects_out_of_range_count():
         {"grad_clip_norm": 0.0},
         {"adam_beta2": 1.0},
         {"weight_decay": -0.1},
+        {"final_lr_fraction": -0.1},
+        {"final_lr_fraction": 1.5},
     ],
 )
 def test_training_config_rejects_degenerate_values(overrides):
     with pytest.raises(ValueError, match=next(iter(overrides))):
         TrainingConfig(**overrides)
+
+
+@pytest.mark.parametrize("fraction", [0.0, 0.1, 1.0])
+def test_final_lr_fraction_accepts_the_closed_unit_interval(fraction):
+    config = TrainingConfig(final_lr_fraction=fraction)
+    peak = 1e-3
+    schedule = [train.learning_rate_at(step, 10, peak, config) for step in range(11)]
+    assert schedule[-1] == pytest.approx(fraction * peak)
+    after_warmup = schedule[2:]
+    assert all(later <= earlier for earlier, later in itertools.pairwise(after_warmup))
 
 
 @pytest.mark.parametrize(

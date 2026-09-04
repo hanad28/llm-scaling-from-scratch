@@ -2,7 +2,10 @@
 
 `run_identity` is the only function that says what a run is: a specification covering
 everything that determines its result (the corpus token files, the resolved GPTConfig,
-the resolved TrainingConfig plus seed) and the SHA-256 of that whole specification.
+the resolved TrainingConfig plus seed, the torch version and the device) and the SHA-256
+of that whole specification. The environment section is deliberately narrow: it separates
+a CPU smoke run from an A40 run of the same name and a torch upgrade from the run before
+it, not every package or OS difference (see README, Limitations).
 Training records its output verbatim in result.json; `verify_result` recomputes it and
 compares. There is no list of constants to maintain: the model and training code read
 every tunable from the two config objects (tests/test_constant_staleness.py enforces
@@ -23,6 +26,8 @@ import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+import torch
 
 from scaling_lm.config import MODEL_SIZES_BY_NAME, ResultsPaths, RunConfig, TrainingConfig
 from scaling_lm.model import GPTConfig
@@ -87,6 +92,21 @@ def hash_specification(specification: dict[str, object]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def select_device() -> torch.device:
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def describe_device(device: torch.device) -> str:
+    """`cpu`, or `cuda:<hardware name>` such as `cuda:NVIDIA A40`."""
+    if device.type == "cuda":
+        return f"cuda:{torch.cuda.get_device_name(device)}"
+    return device.type
+
+
+def environment_specification() -> dict[str, str]:
+    return {"torch_version": torch.__version__, "device": describe_device(select_device())}
+
+
 def run_identity(run_config: RunConfig) -> RunIdentity:
     """The one assembly of everything that determines a run's result, and its fingerprint.
 
@@ -100,6 +120,7 @@ def run_identity(run_config: RunConfig) -> RunIdentity:
         "corpus": corpus_fingerprint(),
         "architecture": asdict(model),
         "schedule": {**asdict(run_config.training), "seed": run_config.seed},
+        "environment": environment_specification(),
     }
     return RunIdentity(specification, hash_specification(specification))
 

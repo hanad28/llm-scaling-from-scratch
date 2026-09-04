@@ -38,18 +38,16 @@ from scaling_lm.runs import (
     RESULT_FILENAME,
     EvalPoint,
     RunResult,
+    describe_device,
     load_run,
     resolve_run,
     run_identity,
+    select_device,
     write_atomically,
 )
 from scaling_lm.validation import non_negative_int, positive_int
 
 logger = logging.getLogger(__name__)
-
-
-def select_device() -> torch.device:
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def kaplan_learning_rate(non_embedding_params: int, config: TrainingConfig) -> float:
@@ -264,7 +262,7 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
         final_validation_loss=final_validation,
         final_test_loss=final_test,
         wall_time_seconds=wall_time,
-        device=str(device),
+        device=describe_device(device),
         history=history,
     )
     save_run(model, result, output_dir)

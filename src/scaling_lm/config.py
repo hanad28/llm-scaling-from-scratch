@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from scaling_lm.validation import (
+    require_fraction,
     require_non_negative,
     require_positive,
     require_unit_interval,
@@ -204,7 +205,7 @@ class TrainingConfig:
         require_unit_interval("adam_beta1", self.adam_beta1)
         require_unit_interval("adam_beta2", self.adam_beta2)
         require_unit_interval("warmup_fraction", self.warmup_fraction)
-        require_non_negative("final_lr_fraction", self.final_lr_fraction)
+        require_fraction("final_lr_fraction", self.final_lr_fraction)
         if self.max_steps is not None:
             require_positive("max_steps", self.max_steps)
 

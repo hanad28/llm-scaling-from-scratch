@@ -168,6 +168,7 @@ def test_specification_is_exactly_the_resolved_configs(monkeypatch):
     model = GPTConfig.from_model_size(MODEL_SIZES_BY_NAME["small"], "learned")
     assert specification["architecture"] == asdict(model)
     assert specification["schedule"] == {**asdict(run_config.training), "seed": 3}
+    assert set(specification) == {"corpus", "architecture", "schedule", "environment"}
 
 
 def test_cli_option_fields_are_exactly_those_the_train_cli_sets():
