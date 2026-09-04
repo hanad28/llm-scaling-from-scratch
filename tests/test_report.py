@@ -1,0 +1,138 @@
+"""The summary separates fit uncertainty from seed-to-seed variance and discloses the budget."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+import numpy as np
+import pytest
+from conftest import STUB_CORPUS_FINGERPRINT
+from test_runs import make_result
+
+from scaling_lm import runs as runs_module
+from scaling_lm.ablation import AblationManifest, analyse_ablation
+from scaling_lm.config import (
+    ABLATION_POSITIONAL_SCHEMES,
+    DEFAULT_POSITIONAL_SCHEME,
+    RunConfig,
+    TrainingConfig,
+)
+from scaling_lm.report import (
+    data_constraint_note,
+    fit_section,
+    seed_spread_of_sweep_scheme,
+    seed_variance_section,
+    sweep_section,
+)
+from scaling_lm.runs import RunResult
+from scaling_lm.scaling_fit import alpha_std_from_loss_noise, fit_power_law
+
+PARAMETER_COUNTS = [793_344, 4_739_072, 12_422_016, 25_220_096, 49_236_480, 99_231_744]
+EPOCHS = [1, 1, 1, 2, 3, 4]
+TOKENS_PER_EPOCH = 118_685_696
+
+
+@pytest.fixture(autouse=True)
+def stub_corpus(monkeypatch):
+    monkeypatch.setattr(runs_module, "corpus_fingerprint", lambda: STUB_CORPUS_FINGERPRINT)
+
+
+def sweep_results() -> list[RunResult]:
+    sizes = ["tiny", "small", "medium", "large", "xlarge", "xxlarge"]
+    results = []
+    for size, count, epochs in zip(sizes, PARAMETER_COUNTS, EPOCHS, strict=True):
+        config = RunConfig(size, DEFAULT_POSITIONAL_SCHEME, 0, TrainingConfig(), epochs=epochs)
+        result = make_result(config, validation_loss=10.0 * count**-0.076)
+        results.append(
+            replace(
+                result,
+                parameters={"total": count + 1, "embedding": 1, "non_embedding": count},
+                tokens_seen=TOKENS_PER_EPOCH * epochs,
+            )
+        )
+    return results
+
+
+def ablation_report(seed_losses: list[float]):
+    """Both ablation schemes over the same seeds, with these losses for the default scheme."""
+    per_scheme = {
+        scheme: [
+            make_result(RunConfig("medium", scheme, seed, TrainingConfig()), validation_loss=loss)
+            for seed, loss in enumerate(seed_losses)
+        ]
+        for scheme in ABLATION_POSITIONAL_SCHEMES
+    }
+    manifest = AblationManifest(
+        model_size="medium",
+        seeds=list(range(len(seed_losses))),
+        run_names={
+            scheme: [result.run_name for result in results]
+            for scheme, results in per_scheme.items()
+        },
+    )
+    return manifest, analyse_ablation(per_scheme)
+
+
+def test_sweep_table_reports_epochs_and_tokens_per_parameter():
+    lines = sweep_section(sweep_results())
+    assert "| Epochs |" in lines[0] and "| Tokens/param |" in lines[0]
+    xxlarge_row = next(line for line in lines if line.startswith("| xxlarge |"))
+    assert "| 4 |" in xxlarge_row
+    assert "| 4.8 |" in xxlarge_row
+    tiny_row = next(line for line in lines if line.startswith("| tiny |"))
+    assert "| 1 |" in tiny_row
+    assert "| 149.6 |" in tiny_row
+
+
+def test_data_constraint_note_names_the_repeated_and_still_short_sizes():
+    note = " ".join(data_constraint_note(sweep_results()))
+    assert "Repeated here: large, xlarge, xxlarge." in note
+    assert "Still below the target at the cap: xxlarge." in note
+    assert "Muennighoff et al., 2023" in note
+
+
+def test_fit_section_labels_the_intervals_as_fit_uncertainty():
+    results = sweep_results()
+    fit = fit_power_law(
+        [result.parameters["non_embedding"] for result in results],
+        [result.final_validation_loss for result in results],
+        bootstrap_resamples=50,
+    )
+    text = "\n".join(fit_section(fit))
+    assert "over 6 sizes" in text
+    assert "Fit uncertainty across the 6 sweep points" in text
+    assert "regression standard error" in text
+
+
+def test_seed_variance_section_uses_the_ablation_spread_for_the_sweep_scheme():
+    results = sweep_results()
+    counts = [result.parameters["non_embedding"] for result in results]
+    losses = [result.final_validation_loss for result in results]
+    fit = fit_power_law(counts, losses, bootstrap_resamples=50)
+    ablation = ablation_report([3.00, 3.02, 3.01])
+    spread = seed_spread_of_sweep_scheme(ablation)
+    assert spread is not None
+    assert (spread.model_size, spread.seed_count) == ("medium", 3)
+    assert spread.loss_std == pytest.approx(float(np.std([3.00, 3.02, 3.01], ddof=1)))
+
+    text = "\n".join(seed_variance_section(results, fit, ablation))
+    expected_alpha_std = alpha_std_from_loss_noise(counts, losses, spread.loss_std)
+    assert "one seed per size" in text
+    assert "Rough scale only" in text
+    assert f"about {expected_alpha_std:.4f} from seed noise alone" in text
+    assert f"regression standard error of {fit.alpha_standard_error:.4f}" in text
+    assert "not added to the fit interval" in text
+
+
+@pytest.mark.parametrize("seed_losses", [None, [3.0]], ids=["no ablation", "one seed"])
+def test_seed_variance_section_says_when_the_spread_is_unmeasured(seed_losses):
+    ablation = None if seed_losses is None else ablation_report(seed_losses)
+    results = sweep_results()
+    fit = fit_power_law(
+        [result.parameters["non_embedding"] for result in results],
+        [result.final_validation_loss for result in results],
+        bootstrap_resamples=50,
+    )
+    assert seed_spread_of_sweep_scheme(ablation) is None
+    text = "\n".join(seed_variance_section(results, fit, ablation))
+    assert "no measurement of this spread" in text

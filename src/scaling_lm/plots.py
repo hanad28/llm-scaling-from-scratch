@@ -47,8 +47,8 @@ def plot_scaling_law(
         fit.predict(grid),
         color="tab:blue",
         label=(
-            f"fit: alpha = {fit.alpha:.3f} "
-            f"({fit.confidence_level:.0%} CI {fit.alpha_ci_low:.3f} to {fit.alpha_ci_high:.3f})"
+            f"fit: alpha = {fit.alpha:.3f} ({fit.confidence_level:.0%} fit interval "
+            f"{fit.alpha_ci_low:.3f} to {fit.alpha_ci_high:.3f}; one seed per size)"
         ),
     )
     axis.plot(
@@ -65,7 +65,7 @@ def plot_scaling_law(
     axis.set_yscale("log")
     axis.set_xlabel("non-embedding parameters")
     axis.set_ylabel("validation loss (nats per token)")
-    axis.set_title("Validation loss against model size, fixed training tokens")
+    axis.set_title("Validation loss against model size, fixed corpus")
     axis.grid(True, which="both", alpha=0.3)
     axis.legend(fontsize=8)
     save(figure, output_path)

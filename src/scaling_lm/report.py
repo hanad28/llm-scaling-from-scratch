@@ -14,6 +14,7 @@ import argparse
 import json
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from scaling_lm.ablation import (
@@ -22,10 +23,17 @@ from scaling_lm.ablation import (
     analyse_ablation,
     read_ablation_manifest,
 )
-from scaling_lm.config import CORPUS_STATS_PATH, KAPLAN_ALPHA_N, ResultsPaths
+from scaling_lm.config import (
+    CORPUS_STATS_PATH,
+    DEFAULT_POSITIONAL_SCHEME,
+    KAPLAN_ALPHA_N,
+    MAX_EPOCHS,
+    MIN_TOKENS_PER_PARAMETER,
+    ResultsPaths,
+)
 from scaling_lm.plots import plot_ablation, plot_scaling_law, plot_training_curves
 from scaling_lm.runs import RunResult, load_run
-from scaling_lm.scaling_fit import PowerLawFit, fit_power_law
+from scaling_lm.scaling_fit import PowerLawFit, alpha_std_from_loss_noise, fit_power_law
 from scaling_lm.sweep import read_sweep_manifest
 
 logger = logging.getLogger(__name__)
@@ -81,21 +89,49 @@ def corpus_section(stats: Mapping[str, object] | None) -> list[str]:
     return lines
 
 
+def tokens_per_parameter(result: RunResult) -> float:
+    return result.tokens_seen / result.parameters["non_embedding"]
+
+
 def sweep_section(results: Sequence[RunResult]) -> list[str]:
     lines = [
-        "| Size | Layers | d_model | Heads | Non-embedding params | Total params | Steps | "
-        "Tokens seen | Peak LR | Validation loss | Test loss | Wall time |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| Size | Layers | d_model | Heads | Non-embedding params | Total params | Epochs | "
+        "Steps | Tokens seen | Tokens/param | Peak LR | Validation loss | Test loss | "
+        "Wall time |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for result in results:
         architecture = architecture_of(result)
         lines.append(
             f"| {result.model_size} | {architecture['n_layer']} | {architecture['d_model']} | "
             f"{architecture['n_head']} | {format_millions(result.parameters['non_embedding'])} | "
-            f"{format_millions(result.parameters['total'])} | {format_int(result.total_steps)} | "
-            f"{format_millions(result.tokens_seen)} | {result.peak_learning_rate:.2e} | "
+            f"{format_millions(result.parameters['total'])} | {result.epochs} | "
+            f"{format_int(result.total_steps)} | {format_millions(result.tokens_seen)} | "
+            f"{tokens_per_parameter(result):.1f} | {result.peak_learning_rate:.2e} | "
             f"{result.final_validation_loss:.4f} | {result.final_test_loss:.4f} | "
             f"{result.wall_time_seconds / 60:.1f} min |"
+        )
+    lines.extend(["", *data_constraint_note(results)])
+    return lines
+
+
+def data_constraint_note(results: Sequence[RunResult]) -> list[str]:
+    """Say which sizes repeated the corpus and which still fall short of the target."""
+    repeated = [result.model_size for result in results if result.epochs > 1]
+    short = [
+        result.model_size
+        for result in results
+        if tokens_per_parameter(result) < MIN_TOKENS_PER_PARAMETER
+    ]
+    lines = [
+        f"Sizes below {MIN_TOKENS_PER_PARAMETER:.0f} tokens per non-embedding parameter after "
+        f"one pass repeat the corpus, up to {MAX_EPOCHS} epochs (Muennighoff et al., 2023). "
+        + (f"Repeated here: {', '.join(repeated)}." if repeated else "No size needed to.")
+    ]
+    if short:
+        lines.append(
+            f"Still below the target at the cap: {', '.join(short)}. Those points are trained "
+            "in a more data-constrained regime than the rest, and the fit treats them the same."
         )
     return lines
 
@@ -106,7 +142,10 @@ def fit_section(fit: PowerLawFit) -> list[str]:
         f"Fitted `loss = {fit.coefficient:.3f} * N^-{fit.alpha:.4f}` over {fit.n_points} sizes "
         f"(R^2 = {fit.r_squared:.4f} in log-log space).",
         "",
-        f"- alpha = {fit.alpha:.4f}, standard error {fit.alpha_standard_error:.4f}",
+        f"Fit uncertainty across the {fit.n_points} sweep points, taking each point's loss as "
+        "measured:",
+        "",
+        f"- alpha = {fit.alpha:.4f}, regression standard error {fit.alpha_standard_error:.4f}",
         f"- {fit.confidence_level:.0%} t-interval: {fit.alpha_ci_low:.4f} to "
         f"{fit.alpha_ci_high:.4f}",
         f"- {fit.confidence_level:.0%} bootstrap interval: {fit.alpha_bootstrap_ci_low:.4f} to "
@@ -116,6 +155,62 @@ def fit_section(fit: PowerLawFit) -> list[str]:
 
 
 AblationReport = tuple[AblationManifest, AblationAnalysis]
+
+
+@dataclass(frozen=True)
+class SeedSpread:
+    """Seed-to-seed spread of validation loss at one size, for the sweep's positional scheme."""
+
+    model_size: str
+    seed_count: int
+    loss_std: float
+
+
+def seed_spread_of_sweep_scheme(ablation: AblationReport | None) -> SeedSpread | None:
+    """The ablation's spread for the sweep's scheme, or None if it was not measured."""
+    if ablation is None:
+        return None
+    manifest, analysis = ablation
+    summary = analysis.schemes.get(DEFAULT_POSITIONAL_SCHEME)
+    if summary is None or len(summary.seeds) < 2:
+        return None
+    return SeedSpread(manifest.model_size, len(summary.seeds), summary.std_validation_loss)
+
+
+def seed_variance_section(
+    results: Sequence[RunResult], fit: PowerLawFit, ablation: AblationReport | None
+) -> list[str]:
+    """The second source of uncertainty: what the sweep's one seed per size cannot show."""
+    lines = [
+        "Run-to-run training variance at a single size is a separate source of uncertainty. "
+        "The sweep trains one seed per size, so each point is a single draw and the intervals "
+        "above do not include how far that draw might sit from the size's average.",
+        "",
+    ]
+    spread = seed_spread_of_sweep_scheme(ablation)
+    if spread is None:
+        lines.append(
+            "The ablation has not been run with at least two seeds for the sweep's positional "
+            "scheme, so there is no measurement of this spread."
+        )
+        return lines
+    counts = [result.parameters["non_embedding"] for result in results]
+    losses = [result.final_validation_loss for result in results]
+    alpha_std = alpha_std_from_loss_noise(counts, losses, spread.loss_std)
+    lines.extend(
+        [
+            f"Rough scale only: the ablation's {spread.seed_count} `{DEFAULT_POSITIONAL_SCHEME}` "
+            f"runs at the {spread.model_size} size have a validation-loss standard deviation of "
+            f"{spread.loss_std:.4f} nats. If every sweep point had that spread, independently, "
+            f"the exponent would carry a standard deviation of about {alpha_std:.4f} from seed "
+            f"noise alone, against a regression standard error of {fit.alpha_standard_error:.4f}.",
+            "",
+            f"This assumes the spread at {spread.model_size} applies at every size, and a "
+            f"standard deviation from {spread.seed_count} seeds is itself imprecise. It is not "
+            "added to the fit interval, because the two are not measured on the same footing.",
+        ]
+    )
+    return lines
 
 
 def ablation_section(ablation: AblationReport | None) -> list[str]:
@@ -242,6 +337,10 @@ def build_report(paths: ResultsPaths, title: str) -> PowerLawFit:
         "## Power-law fit",
         "",
         *fit_section(fit),
+        "",
+        "### Run-to-run variance",
+        "",
+        *seed_variance_section(results, fit, ablation),
         "",
         "## Positional encoding ablation",
         "",

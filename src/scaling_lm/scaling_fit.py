@@ -4,6 +4,12 @@ Taking logs turns the power law into a straight line, ln L = ln a - alpha ln N,
 so the exponent is the negative slope of an ordinary least-squares fit in log-log
 space. Two uncertainty estimates are reported: the regression standard error
 turned into a t-interval, and a non-parametric bootstrap over the data points.
+
+Both describe how well the sweep points, taken as measured, pin down the slope. The
+sweep trains one seed per size, so neither measures how much a single point would move
+if its run were repeated with another seed. `alpha_std_from_loss_noise` propagates an
+externally measured per-run loss spread (the ablation's seed spread) through the same
+regression to give a rough, separately labelled scale for that second source.
 """
 
 from __future__ import annotations
@@ -76,6 +82,35 @@ def validate_inputs(
     require_positive("bootstrap_resamples", bootstrap_resamples)
     require_unit_interval("confidence_level", confidence_level)
     require_non_negative("seed", seed)
+
+
+def alpha_std_from_loss_noise(
+    parameter_counts: np.ndarray, losses: np.ndarray, loss_noise_std: float
+) -> float:
+    """Standard deviation of alpha if every point's loss had independent noise of this std.
+
+    The regression is on ln(loss), where a loss perturbation of `loss_noise_std` becomes
+    about `loss_noise_std / loss` at each point. The OLS slope is a fixed linear
+    combination of the ln(loss) values, so its variance follows directly. This treats the
+    supplied spread as the same at every size, which is an assumption, not a measurement.
+    """
+    parameter_counts = np.asarray(parameter_counts, dtype=float)
+    losses = np.asarray(losses, dtype=float)
+    if parameter_counts.ndim != 1 or parameter_counts.shape != losses.shape:
+        raise ValueError("parameter_counts and losses must be 1-D arrays of the same length")
+    if len(parameter_counts) < MIN_POINTS_FOR_FIT:
+        raise ValueError(f"need at least {MIN_POINTS_FOR_FIT} points to propagate loss noise")
+    if np.any(parameter_counts <= 0) or np.any(losses <= 0):
+        raise ValueError("parameter counts and losses must be positive for a log-log fit")
+    require_non_negative("loss_noise_std", loss_noise_std)
+    log_counts = np.log(parameter_counts)
+    centred = log_counts - log_counts.mean()
+    sum_of_squares = float(np.sum(centred**2))
+    if sum_of_squares == 0.0:
+        raise ValueError("parameter counts must not all be equal")
+    slope_weights = centred / sum_of_squares
+    log_loss_noise = loss_noise_std / losses
+    return float(np.sqrt(np.sum((slope_weights * log_loss_noise) ** 2)))
 
 
 def log_log_slope(parameter_counts: np.ndarray, losses: np.ndarray) -> tuple[float, float]:
