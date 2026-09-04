@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project data and heavy experiment artefacts (rebuilt from the pipeline)
+data/raw/
+data/corpus/
+data/tokens/
+data/tokenizer.json
+results/runs/
