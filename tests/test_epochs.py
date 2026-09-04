@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 
 import numpy as np
@@ -15,6 +16,19 @@ from scaling_lm.dataset import TokenWindows, epoch_batches
 
 BATCH_SIZE = 3
 FULL_BATCHES_PER_EPOCH = SYNTHETIC_WINDOWS // BATCH_SIZE
+# Two-window batches accumulated three per step: four full batches per pass, of which
+# three make a step and the fourth (two windows) must be dropped, not carried over.
+ACCUMULATING = TrainingConfig(
+    batch_size_sequences=2,
+    gradient_accumulation_steps=3,
+    max_steps=None,
+    eval_interval_steps=1,
+    use_mixed_precision=False,
+)
+WINDOWS_PER_ACCUMULATED_STEP = (
+    ACCUMULATING.batch_size_sequences * ACCUMULATING.gradient_accumulation_steps
+)
+DROPPED_WINDOWS_PER_PASS = SYNTHETIC_WINDOWS % WINDOWS_PER_ACCUMULATED_STEP
 
 
 def passes(batches: list[np.ndarray]) -> list[np.ndarray]:
@@ -55,6 +69,56 @@ def test_epoch_batches_rejects_a_non_positive_epoch_count(synthetic_corpus):
     windows = TokenWindows("train")
     with pytest.raises(ValueError, match="epochs"):
         next(epoch_batches(windows, BATCH_SIZE, seed=0, epochs=0))
+
+
+def accumulated_batches(epochs: int) -> list[np.ndarray]:
+    return list(
+        epoch_batches(
+            TokenWindows("train"),
+            ACCUMULATING.batch_size_sequences,
+            seed=0,
+            epochs=epochs,
+            micro_batches_per_step=ACCUMULATING.gradient_accumulation_steps,
+        )
+    )
+
+
+def test_no_optimiser_step_mixes_windows_from_two_epochs(synthetic_corpus):
+    assert DROPPED_WINDOWS_PER_PASS > 0, "the fixture must leave a remainder to prove anything"
+    epochs = 2
+    batches = accumulated_batches(epochs)
+    steps = steps_per_epoch(SYNTHETIC_WINDOWS, ACCUMULATING)
+    micro_batches_per_pass = steps * ACCUMULATING.gradient_accumulation_steps
+    assert len(batches) == epochs * micro_batches_per_pass
+    # Rebuild each pass's permutation the way the loader must: one generator, one draw per
+    # pass. Every step's micro-batches then lie inside a single pass's prefix.
+    generator = np.random.default_rng(0)
+    for epoch_index in range(epochs):
+        permutation = generator.permutation(SYNTHETIC_WINDOWS)
+        start = epoch_index * micro_batches_per_pass
+        seen = np.concatenate(batches[start : start + micro_batches_per_pass])
+        expected = permutation[: SYNTHETIC_WINDOWS - DROPPED_WINDOWS_PER_PASS]
+        assert np.array_equal(seen, expected)
+        assert len(np.unique(seen)) == len(seen)
+
+
+def test_dropped_windows_are_logged_per_pass(synthetic_corpus, caplog):
+    with caplog.at_level(logging.INFO, logger="scaling_lm.dataset"):
+        accumulated_batches(epochs=2)
+    expected = f"{DROPPED_WINDOWS_PER_PASS} of {SYNTHETIC_WINDOWS} windows"
+    assert expected in caplog.text
+
+
+def test_accumulated_multi_epoch_run_drops_the_remainder_and_says_so(
+    synthetic_corpus, tmp_path, caplog
+):
+    run_config = RunConfig("tiny", training=ACCUMULATING, epochs=2)
+    with caplog.at_level(logging.INFO):
+        result = train.train_run(run_config, ResultsPaths(tmp_path))
+    steps = steps_per_epoch(SYNTHETIC_WINDOWS, ACCUMULATING)
+    assert result.total_steps == 2 * steps
+    assert result.tokens_seen == 2 * steps * ACCUMULATING.tokens_per_step
+    assert f"{DROPPED_WINDOWS_PER_PASS} of {SYNTHETIC_WINDOWS} windows" in caplog.text
 
 
 def test_planned_steps_multiplies_by_epochs_then_caps():
