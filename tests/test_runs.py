@@ -192,6 +192,34 @@ def test_load_run_rejects_a_record_without_an_epoch_count(tmp_path):
         load_run(run_config.run_name, paths)
 
 
+def write_pre_epoch_result(run_config: RunConfig, paths: ResultsPaths) -> None:
+    """A result.json as PR1 wrote it: no epoch count anywhere, fingerprint consistent."""
+    payload = asdict(make_result(run_config))
+    del payload["epochs"]
+    del payload["identity"]["specification"]["schedule"]["epochs"]
+    payload["identity"]["fingerprint"] = hash_specification(payload["identity"]["specification"])
+    run_dir = paths.run_directory(run_config.run_name)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / RESULT_FILENAME).write_text(json.dumps(payload))
+
+
+def test_pre_epoch_result_is_stale_for_the_loader_not_a_type_error(tmp_path):
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4))
+    write_pre_epoch_result(run_config, paths)
+    with pytest.raises(StaleRunError, match="epochs.*Delete the run directory"):
+        load_run(run_config.run_name, paths)
+
+
+def test_pre_epoch_result_is_stale_for_a_new_request_not_a_type_error(tmp_path, monkeypatch):
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4))
+    write_pre_epoch_result(run_config, paths)
+    monkeypatch.setattr(train_module, "train_run", lambda *_args: pytest.fail("trained"))
+    with pytest.raises(StaleRunError, match="epochs.*Delete the run directory"):
+        train_or_load(run_config, paths)
+
+
 def test_train_or_load_rejects_rebuilt_corpus(saved_run, monkeypatch):
     run_config, paths = saved_run
     monkeypatch.setattr(runs_module, "corpus_fingerprint", lambda: REBUILT_CORPUS_FINGERPRINT)
