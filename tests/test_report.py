@@ -29,7 +29,7 @@ from scaling_lm.runs import RunResult
 from scaling_lm.scaling_fit import alpha_std_from_loss_noise, fit_power_law
 
 PARAMETER_COUNTS = [793_344, 4_739_072, 12_422_016, 25_220_096, 49_236_480, 99_231_744]
-EPOCHS = [1, 1, 1, 2, 3, 4]
+EPOCHS = [1, 1, 1, 1, 3, 4]
 TOKENS_PER_EPOCH = 118_685_696
 
 
@@ -85,10 +85,12 @@ def test_sweep_table_reports_epochs_and_tokens_per_parameter():
     assert "| 149.6 |" in tiny_row
 
 
-def test_data_constraint_note_names_the_repeated_and_still_short_sizes():
+def test_data_constraint_note_names_the_repeated_borderline_and_still_short_sizes():
     note = " ".join(data_constraint_note(sweep_results()))
-    assert "Repeated here: large, xlarge, xxlarge." in note
-    assert "Still below the target after training: xxlarge." in note
+    assert "clearly below 5 tokens per non-embedding parameter" in note
+    assert "Repeated here: xlarge, xxlarge." in note
+    assert "Within 10% of the target and left at one pass: large." in note
+    assert "Still clearly below the target after training: xxlarge." in note
     assert "Muennighoff et al., 2023" in note
 
 

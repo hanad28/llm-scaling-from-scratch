@@ -11,6 +11,7 @@ from scaling_lm.budget import (
     budget_table,
     non_embedding_parameter_count,
     planned_epochs,
+    repetition_threshold,
     steps_per_epoch,
     token_budget,
     tokens_per_epoch,
@@ -24,19 +25,29 @@ from scaling_lm.config import (
     MIN_TOKENS_PER_PARAMETER,
     MODEL_SIZES,
     MODEL_SIZES_BY_NAME,
+    REPETITION_TOLERANCE,
 )
 from scaling_lm.model import GPT, GPTConfig
 from scaling_lm.sweep import sweep_run_config
 
 # The committed corpus: 118,703,695 training tokens, 463,686 windows of 256, 3,622 full
-# steps of 128 sequences. Each size's epoch count is the plan the README documents.
+# steps of 128 sequences. Each size's epoch count is the plan the README documents. `large`
+# stays at one pass: 4.7 tokens per parameter is a borderline case, not severe starvation.
 EXPECTED_EPOCHS = {
     "tiny": 1,
     "small": 1,
     "medium": 1,
-    "large": 2,
+    "large": 1,
     "xlarge": 3,
     "xxlarge": 4,
+}
+EXPECTED_ONE_PASS_TOKENS_PER_PARAMETER = {
+    "tiny": 149.6,
+    "small": 25.0,
+    "medium": 9.6,
+    "large": 4.7,
+    "xlarge": 2.4,
+    "xxlarge": 1.2,
 }
 
 
@@ -55,13 +66,30 @@ def test_meta_device_count_matches_a_real_model(size):
     assert non_embedding_parameter_count(size) == real
 
 
-def test_planned_epochs_is_the_fewest_passes_that_reach_the_target():
+def test_a_size_clearly_below_the_floor_takes_the_fewest_passes_that_reach_it():
     assert planned_epochs(epoch_tokens=100, non_embedding_params=10) == 1
     assert planned_epochs(epoch_tokens=50, non_embedding_params=10) == 1
-    assert planned_epochs(epoch_tokens=49, non_embedding_params=10) == 2
     assert planned_epochs(epoch_tokens=25, non_embedding_params=10) == 2
     assert planned_epochs(epoch_tokens=17, non_embedding_params=10) == 3
     assert planned_epochs(epoch_tokens=13, non_embedding_params=10) == 4
+
+
+def test_a_size_just_under_the_floor_stays_at_one_pass():
+    threshold = repetition_threshold()
+    assert threshold == pytest.approx(MIN_TOKENS_PER_PARAMETER * (1 - REPETITION_TOLERANCE))
+    assert threshold < 4.7 < MIN_TOKENS_PER_PARAMETER
+    assert planned_epochs(epoch_tokens=47, non_embedding_params=10) == 1
+    assert planned_epochs(epoch_tokens=45, non_embedding_params=10) == 1
+    assert planned_epochs(epoch_tokens=44, non_embedding_params=10) == 2
+    # Only the decision to repeat is soft; a size that repeats aims at the target itself.
+    assert planned_epochs(epoch_tokens=24, non_embedding_params=10) == 3
+    assert planned_epochs(epoch_tokens=47, non_embedding_params=10, tolerance=0.0) == 2
+
+
+@pytest.mark.parametrize("tolerance", [-0.1, 1.0])
+def test_planned_epochs_rejects_a_tolerance_outside_zero_to_one(tolerance):
+    with pytest.raises(ValueError, match="tolerance"):
+        planned_epochs(epoch_tokens=10, non_embedding_params=10, tolerance=tolerance)
 
 
 def test_planned_epochs_is_capped_even_when_the_target_is_out_of_reach():
@@ -105,6 +133,9 @@ def test_committed_corpus_gives_the_documented_plan():
         for size in MODEL_SIZES
     }
     assert {name: budget.epochs for name, budget in budgets.items()} == EXPECTED_EPOCHS
+    assert {
+        name: round(budget.one_epoch_tokens_per_parameter, 1) for name, budget in budgets.items()
+    } == EXPECTED_ONE_PASS_TOKENS_PER_PARAMETER
     one_pass_tokens = steps_per_epoch(train_window_count, DEFAULT_TRAINING_CONFIG) * (
         DEFAULT_TRAINING_CONFIG.tokens_per_step
     )
@@ -112,15 +143,24 @@ def test_committed_corpus_gives_the_documented_plan():
         assert budget.tokens_per_epoch == one_pass_tokens
         assert budget.tokens_seen == one_pass_tokens * budget.epochs
         if budget.epochs > 1:
-            assert budget.one_epoch_tokens_per_parameter < MIN_TOKENS_PER_PARAMETER
+            assert budget.one_epoch_tokens_per_parameter < repetition_threshold()
             previous_pass = (budget.epochs - 1) * budget.one_epoch_tokens_per_parameter
             assert previous_pass < MIN_TOKENS_PER_PARAMETER
+    # `large` is left a little under the floor rather than doubled to 9.4.
+    large = budgets["large"]
+    assert large.epochs == 1
+    assert not large.meets_target
+    assert large.within_tolerance
+    assert large.tokens_per_parameter == pytest.approx(4.71, abs=0.01)
     # The rule does not rescue the largest size: about 4.8 tokens per parameter at the cap.
     largest = budgets["xxlarge"]
     assert largest.epochs == MAX_EPOCHS
     assert not largest.meets_target
+    assert not largest.within_tolerance
     assert largest.tokens_per_parameter == pytest.approx(4.78, abs=0.01)
-    assert all(budget.meets_target for name, budget in budgets.items() if name != "xxlarge")
+    assert all(
+        budget.meets_target for name, budget in budgets.items() if name not in ("large", "xxlarge")
+    )
 
 
 def test_missing_corpus_stats_is_a_clear_error(tmp_path):
