@@ -71,17 +71,37 @@ def plot_scaling_law(
     save(figure, output_path)
 
 
+def training_curve_label(result: RunResult) -> str:
+    """Legend entry naming the size, its parameter count and how many passes it trained for."""
+    passes = "pass" if result.epochs == 1 else "passes"
+    non_embedding_millions = result.parameters["non_embedding"] / 1e6
+    return f"{result.model_size} ({non_embedding_millions:.1f}M, {result.epochs} {passes})"
+
+
+def training_curves_title(results: Sequence[RunResult]) -> str:
+    """State the range of pass counts in the figure, rather than assuming one pass for all."""
+    epoch_counts = {result.epochs for result in results}
+    if epoch_counts == {1}:
+        return "Validation loss during the single training pass"
+    if len(epoch_counts) == 1:
+        return f"Validation loss during training ({epoch_counts.pop()} passes)"
+    return f"Validation loss during training ({min(epoch_counts)} to {max(epoch_counts)} passes)"
+
+
 def plot_training_curves(results: Sequence[RunResult], output_path: Path) -> None:
-    """Periodic validation loss against tokens seen, one line per model size."""
+    """Periodic validation loss against tokens seen, one line per model size.
+
+    Sizes train for different numbers of passes over the corpus, so the legend carries each
+    model's pass count and the title the range across the figure.
+    """
     figure, axis = plt.subplots(figsize=FIGURE_SIZE)
     for result in results:
         tokens = [point.tokens_seen for point in result.history]
         losses = [point.validation_loss for point in result.history]
-        label = f"{result.model_size} ({result.parameters['non_embedding'] / 1e6:.1f}M)"
-        axis.plot(tokens, losses, label=label)
+        axis.plot(tokens, losses, label=training_curve_label(result))
     axis.set_xlabel("training tokens seen")
     axis.set_ylabel("validation loss (nats per token)")
-    axis.set_title("Validation loss during the single training pass")
+    axis.set_title(training_curves_title(results))
     axis.grid(True, alpha=0.3)
     axis.legend(fontsize=8)
     save(figure, output_path)
