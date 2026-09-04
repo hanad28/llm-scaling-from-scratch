@@ -141,7 +141,7 @@ Optimiser settings follow common GPT-2 scale practice: AdamW (Loshchilov and Hut
 
 Kaplan et al. trained with about 23 billion tokens and reported `alpha_N` for models trained to convergence. Even after repetition, the two ends of this sweep sit on opposite sides of Hoffmann et al.'s (2022) roughly 20-tokens-per-parameter guideline, at about 150 and 4.8. That is the main reason not to expect the exponents to agree exactly, and it is discussed under Limitations.
 
-Compute is modest: with `6 * N * D` FLOPs per training run the largest model needs about 2.8e17 FLOPs over its four passes, the six-model sweep is about 4.4e17, and the sweep plus the ablation runs is about 4.9e17 FLOPs, a few hours on one A40 even at low utilisation.
+Compute is modest: with `6 * N * D` FLOPs per training run the largest model needs about 2.8e17 FLOPs over its four passes, the six-model sweep is about 4.2e17, and the sweep plus the ablation runs is about 4.7e17 FLOPs, a few hours on one A40 even at low utilisation.
 
 ### Fitting the power law
 
