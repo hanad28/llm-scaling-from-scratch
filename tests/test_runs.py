@@ -40,6 +40,7 @@ def make_result(run_config: RunConfig, validation_loss: float = 3.0) -> RunResul
         seed=run_config.seed,
         parameters={"total": 1, "embedding": 1, "non_embedding": 1},
         identity=run_identity(run_config),
+        epochs=run_config.epochs,
         total_steps=1,
         tokens_seen=1,
         peak_learning_rate=1e-3,
@@ -83,6 +84,20 @@ def test_fingerprint_covers_corpus_architecture_and_schedule():
         RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4, warmup_fraction=0.5)),
     ]
     assert all(run_identity(variant).fingerprint != baseline for variant in variants)
+
+
+def test_fingerprint_distinguishes_epoch_counts_at_the_same_size():
+    training = TrainingConfig(max_steps=4)
+    one_epoch = run_identity(RunConfig("tiny", "learned", 0, training, epochs=1))
+    assert one_epoch.specification["schedule"]["epochs"] == 1
+    repeated = {
+        epochs: run_identity(RunConfig("tiny", "learned", 0, training, epochs=epochs))
+        for epochs in (2, 3, 4)
+    }
+    for epochs, identity in repeated.items():
+        assert identity.specification["schedule"]["epochs"] == epochs
+        assert identity.fingerprint != one_epoch.fingerprint
+    assert len({identity.fingerprint for identity in repeated.values()}) == len(repeated)
 
 
 def pretend_to_be_an_a40(monkeypatch) -> None:
@@ -142,6 +157,39 @@ def test_train_or_load_rejects_different_training_config(saved_run):
     changed = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=8))
     with pytest.raises(StaleRunError, match="changed: \\['schedule'\\]"):
         train_or_load(changed, paths)
+
+
+def test_train_or_load_rejects_different_epoch_count(saved_run):
+    run_config, paths = saved_run
+    assert run_config.epochs == 1
+    repeated = RunConfig("tiny", "learned", 0, run_config.training, epochs=2)
+    assert repeated.run_name == run_config.run_name
+    with pytest.raises(StaleRunError, match="changed: \\['schedule'\\]"):
+        train_or_load(repeated, paths)
+
+
+def test_load_run_restores_the_recorded_epoch_count(tmp_path):
+    paths = ResultsPaths(tmp_path)
+    repeated = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4), epochs=3)
+    write_result(make_result(repeated), paths)
+    loaded = load_run(repeated.run_name, paths)
+    assert loaded.epochs == 3
+    assert loaded.identity == run_identity(repeated)
+    assert loaded.identity != run_identity(RunConfig("tiny", "learned", 0, repeated.training))
+
+
+def test_load_run_rejects_a_record_without_an_epoch_count(tmp_path):
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4))
+    write_result(make_result(run_config), paths)
+    result_file = paths.run_directory(run_config.run_name) / RESULT_FILENAME
+    payload = json.loads(result_file.read_text())
+    del payload["identity"]["specification"]["schedule"]["epochs"]
+    # Rehash so the edited-file guard does not fire first; the missing key is what is tested.
+    payload["identity"]["fingerprint"] = hash_specification(payload["identity"]["specification"])
+    result_file.write_text(json.dumps(payload))
+    with pytest.raises(StaleRunError, match="lacks \\['epochs'\\]"):
+        load_run(run_config.run_name, paths)
 
 
 def test_train_or_load_rejects_rebuilt_corpus(saved_run, monkeypatch):

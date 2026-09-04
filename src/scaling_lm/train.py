@@ -1,8 +1,8 @@
-"""Single-run training loop: one shuffled pass over the training split with AdamW and cosine decay.
+"""Single-run training loop: shuffled passes over the training split with AdamW and cosine decay.
 
 Run one configuration directly with:
 
-    python -m scaling_lm.train --model-size small [--positional rope] [--seed 1]
+    python -m scaling_lm.train --model-size small [--positional rope] [--seed 1] [--epochs 2]
 
 A run whose result.json already exists is loaded rather than retrained, provided
 `runs.resolve_run` accepts it as the same run (same corpus, architecture and schedule).
@@ -24,6 +24,7 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
+from scaling_lm.budget import steps_per_epoch
 from scaling_lm.config import (
     MODEL_SIZES_BY_NAME,
     POSITIONAL_SCHEMES,
@@ -45,7 +46,7 @@ from scaling_lm.runs import (
     select_device,
     write_atomically,
 )
-from scaling_lm.validation import non_negative_int, positive_int
+from scaling_lm.validation import non_negative_int, positive_int, require_positive
 
 logger = logging.getLogger(__name__)
 
@@ -121,10 +122,10 @@ def micro_batches_per_step(config: TrainingConfig) -> int:
     return config.gradient_accumulation_steps
 
 
-def planned_steps(train_window_count: int, config: TrainingConfig) -> int:
-    """Optimiser steps in one pass (full batches only), capped by max_steps. Must be at least 1."""
-    micro_batches_total = train_window_count // config.batch_size_sequences
-    total_steps = micro_batches_total // micro_batches_per_step(config)
+def planned_steps(train_window_count: int, config: TrainingConfig, epochs: int = 1) -> int:
+    """Optimiser steps over `epochs` passes (full batches only), capped by max_steps. At least 1."""
+    require_positive("epochs", epochs)
+    total_steps = steps_per_epoch(train_window_count, config) * epochs
     if config.max_steps is not None:
         total_steps = min(total_steps, config.max_steps)
     if total_steps < 1:
@@ -156,7 +157,7 @@ def train_step(
 
 
 def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
-    """Train one model for one pass over the training split and evaluate it. Saves artefacts."""
+    """Train one model for `run_config.epochs` passes over the training split. Saves artefacts."""
     config = run_config.training
     output_dir = paths.run_directory(run_config.run_name)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -173,11 +174,12 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
     train_windows = TokenWindows("train")
     validation_windows = TokenWindows("validation")
     test_windows = TokenWindows("test")
-    total_steps = planned_steps(len(train_windows), config)
+    total_steps = planned_steps(len(train_windows), config, run_config.epochs)
     logger.info(
-        "%s: %s params, %d steps of %d tokens, peak lr %.2e, device %s",
+        "%s: %s params, %d epochs, %d steps of %d tokens, peak lr %.2e, device %s",
         run_config.run_name,
         parameter_counts,
+        run_config.epochs,
         total_steps,
         config.tokens_per_step,
         peak_lr,
@@ -185,7 +187,10 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
     )
 
     optimizer = build_optimizer(model, peak_lr, config)
-    batch_iterator = epoch_batches(train_windows, config.batch_size_sequences, run_config.seed)
+    batch_iterator = epoch_batches(
+        train_windows, config.batch_size_sequences, run_config.seed, run_config.epochs
+    )
+    epoch_length = steps_per_epoch(len(train_windows), config)
     history: list[EvalPoint] = []
     start_time = time.time()
     forward_model.train()
@@ -201,7 +206,13 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
 
         if step % config.log_interval_steps == 0:
             logger.info(
-                "step %d/%d loss %.4f lr %.2e", step, total_steps, train_loss, learning_rate
+                "epoch %d/%d step %d/%d loss %.4f lr %.2e",
+                step // epoch_length + 1,
+                run_config.epochs,
+                step,
+                total_steps,
+                train_loss,
+                learning_rate,
             )
         is_last = step == total_steps - 1
         if step % config.eval_interval_steps == 0 or is_last:
@@ -256,6 +267,7 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
         seed=run_config.seed,
         parameters=parameter_counts,
         identity=identity,
+        epochs=run_config.epochs,
         total_steps=total_steps,
         tokens_seen=total_steps * config.tokens_per_step,
         peak_learning_rate=peak_lr,

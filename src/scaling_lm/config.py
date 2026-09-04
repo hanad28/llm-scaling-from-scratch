@@ -244,12 +244,18 @@ GENERATION_PROMPTS: tuple[str, ...] = (
 
 @dataclass
 class RunConfig:
-    """Everything needed to reproduce a single training run."""
+    """Everything needed to reproduce a single training run.
+
+    `epochs` is the number of shuffled passes over the training split. It sits here rather
+    than in TrainingConfig because it is set per size by the sweep (see budget.py), whereas
+    TrainingConfig is shared by every run.
+    """
 
     model_size: str
     positional_scheme: str = DEFAULT_POSITIONAL_SCHEME
     seed: int = 0
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    epochs: int = 1
 
     def __post_init__(self) -> None:
         if self.model_size not in MODEL_SIZES_BY_NAME:
@@ -263,6 +269,7 @@ class RunConfig:
                 f"{list(POSITIONAL_SCHEMES)}"
             )
         require_non_negative("seed", self.seed)
+        require_positive("epochs", self.epochs)
 
     @property
     def run_name(self) -> str:

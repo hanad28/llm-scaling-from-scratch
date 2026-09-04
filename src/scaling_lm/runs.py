@@ -2,10 +2,10 @@
 
 `run_identity` is the only function that says what a run is: a specification covering
 everything that determines its result (the corpus token files, the resolved GPTConfig,
-the resolved TrainingConfig plus seed, the torch version and the device) and the SHA-256
-of that whole specification. The environment section is deliberately narrow: it separates
-a CPU smoke run from an A40 run of the same name and a torch upgrade from the run before
-it, not every package or OS difference (see README, Limitations).
+the resolved TrainingConfig plus seed and epoch count, the torch version and the device)
+and the SHA-256 of that whole specification. The environment section is deliberately
+narrow: it separates a CPU smoke run from an A40 run of the same name and a torch upgrade
+from the run before it, not every package or OS difference (see README, Limitations).
 Training records its output verbatim in result.json; `verify_result` recomputes it and
 compares. There is no list of constants to maintain: the model and training code read
 every tunable from the two config objects (tests/test_constant_staleness.py enforces
@@ -39,6 +39,7 @@ CHECKPOINT_FILENAME = "model.pt"
 RESULT_FILENAME = "result.json"
 PARTIAL_WRITE_SUFFIX = ".partial"
 FINGERPRINT_PREVIEW_CHARS = 12
+EPOCHS_KEY = "epochs"
 
 
 @dataclass
@@ -73,6 +74,7 @@ class RunResult:
     seed: int
     parameters: dict[str, int]
     identity: RunIdentity
+    epochs: int
     total_steps: int
     tokens_seen: int
     peak_learning_rate: float
@@ -112,14 +114,20 @@ def run_identity(run_config: RunConfig) -> RunIdentity:
 
     The corpus enters as `corpus_fingerprint()`, a hash of the token files kept in
     tokenizer.py because it describes the data, not a run; it is an input here, not a
-    second identity. Architecture and schedule are `asdict()` of the resolved configs.
+    second identity. Architecture and schedule are `asdict()` of the resolved configs; the
+    schedule also carries the two per-run settings RunConfig holds outside TrainingConfig,
+    the seed and the epoch count.
     """
     size = MODEL_SIZES_BY_NAME[run_config.model_size]
     model = GPTConfig.from_model_size(size, run_config.positional_scheme)
     specification: dict[str, object] = {
         "corpus": corpus_fingerprint(),
         "architecture": asdict(model),
-        "schedule": {**asdict(run_config.training), "seed": run_config.seed},
+        "schedule": {
+            **asdict(run_config.training),
+            "seed": run_config.seed,
+            "epochs": run_config.epochs,
+        },
         "environment": environment_specification(),
     }
     return RunIdentity(specification, hash_specification(specification))
@@ -128,15 +136,16 @@ def run_identity(run_config: RunConfig) -> RunIdentity:
 def run_config_of(result: RunResult) -> RunConfig:
     """Rebuild the request a saved result answers: its name plus the options its CLI was given.
 
-    Only the CLI options are taken from the saved record. Every other TrainingConfig
-    field comes from the current code, so checking the rebuilt request against the record
-    catches a changed constant just as `resolve_run` does for a fresh request.
+    Only the CLI options and the per-run epoch count are taken from the saved record. Every
+    other TrainingConfig field comes from the current code, so checking the rebuilt request
+    against the record catches a changed constant just as `resolve_run` does for a fresh
+    request.
     """
     schedule = result.identity.specification["schedule"]
     if not isinstance(schedule, dict):
         raise StaleRunError(f"{result.run_name}: result.json has no schedule section")
     option_names = TrainingConfig.cli_option_names()
-    missing = sorted(option_names - schedule.keys())
+    missing = sorted((option_names | {EPOCHS_KEY}) - schedule.keys())
     if missing:
         raise StaleRunError(f"{result.run_name}: result.json schedule lacks {missing}")
     training = {name: schedule[name] for name in option_names}
@@ -145,6 +154,7 @@ def run_config_of(result: RunResult) -> RunConfig:
         positional_scheme=result.positional_scheme,
         seed=result.seed,
         training=TrainingConfig(**training),
+        epochs=schedule[EPOCHS_KEY],
     )
 
 

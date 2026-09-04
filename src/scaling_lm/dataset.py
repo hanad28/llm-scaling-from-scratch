@@ -1,8 +1,9 @@
 """Batching over the flat token files produced by scaling_lm.tokenizer.
 
 The training split is cut into non-overlapping windows of CONTEXT_LENGTH tokens.
-One epoch visits every window exactly once in a seeded random order, so every
-model in the sweep sees the same tokens and the same number of steps.
+One epoch visits every window exactly once in a seeded random order; a run of several
+epochs repeats the split with a fresh shuffle each time, so every model in the sweep
+sees the same windows and two runs with the same seed see them in the same order.
 """
 
 from __future__ import annotations
@@ -42,20 +43,23 @@ class TokenWindows:
         return inputs, targets
 
 
-def epoch_batches(windows: TokenWindows, batch_size: int, seed: int) -> Iterator[np.ndarray]:
-    """Yield window-index arrays covering one shuffled pass, dropping the final partial batch."""
+def epoch_batches(
+    windows: TokenWindows, batch_size: int, seed: int, epochs: int = 1
+) -> Iterator[np.ndarray]:
+    """Yield window-index arrays for `epochs` shuffled passes, dropping each pass's partial batch.
+
+    One generator is seeded once and draws one permutation per pass, so the first pass of
+    a multi-epoch run is identical to a single-epoch run with the same seed.
+    """
     require_positive("batch_size", batch_size)
     require_non_negative("seed", seed)
+    require_positive("epochs", epochs)
     generator = np.random.default_rng(seed)
-    permutation = generator.permutation(len(windows))
     full_batches = len(windows) // batch_size
-    for batch_index in range(full_batches):
-        yield permutation[batch_index * batch_size : (batch_index + 1) * batch_size]
-
-
-def steps_per_epoch(windows: TokenWindows, batch_size: int) -> int:
-    require_positive("batch_size", batch_size)
-    return len(windows) // batch_size
+    for _ in range(epochs):
+        permutation = generator.permutation(len(windows))
+        for batch_index in range(full_batches):
+            yield permutation[batch_index * batch_size : (batch_index + 1) * batch_size]
 
 
 def sequential_batches(windows: TokenWindows, batch_size: int) -> Iterator[np.ndarray]:
