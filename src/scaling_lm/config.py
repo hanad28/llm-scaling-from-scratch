@@ -167,11 +167,16 @@ FINAL_LR_FRACTION = 0.1
 WARMUP_FRACTION = 0.05
 
 # One pass over the corpus gives every size the same tokens, so tokens per non-embedding
-# parameter falls as the model grows. A size that would see fewer than this many in one
-# pass repeats the corpus (budget.py), up to MAX_EPOCHS passes: Muennighoff et al. (2023)
-# find up to four passes over the same data cost little against the same number of fresh
-# tokens. The largest sizes stay below the target even at the cap; see README.
+# parameter falls as the model grows. MIN_TOKENS_PER_PARAMETER is a soft floor for catching
+# severe under-training, not a strict cutoff: a size whose one pass lands more than
+# REPETITION_TOLERANCE (a fraction of the floor) below it repeats the corpus (budget.py)
+# until it reaches the floor, up to MAX_EPOCHS passes. A size a little under the floor is
+# left at one pass, since doubling its data would over-correct a borderline case.
+# Muennighoff et al. (2023) find up to four passes over the same data cost little against
+# the same number of fresh tokens. The largest size stays below the floor even at the cap;
+# see README.
 MIN_TOKENS_PER_PARAMETER = 5.0
+REPETITION_TOLERANCE = 0.1
 MAX_EPOCHS = 4
 
 

@@ -2,10 +2,12 @@
 
 One pass over the training split delivers the same tokens to every size, so tokens per
 non-embedding parameter falls as the model grows: about 150 for the smallest size and
-1.2 for the largest. A size that would see fewer than MIN_TOKENS_PER_PARAMETER in one
-pass repeats the split, reshuffled, up to MAX_EPOCHS passes. Muennighoff et al. (2023)
-find that up to four passes over the same data cost little against the same number of
-fresh tokens. The rule is applied by the sweep and the ablation; `python -m
+1.2 for the largest. MIN_TOKENS_PER_PARAMETER is a soft floor for catching severe
+under-training. A size that lands clearly below it in one pass, by more than
+REPETITION_TOLERANCE of the floor, repeats the split, reshuffled, until it reaches the
+floor or MAX_EPOCHS passes; a size only a little under it stays at one pass. Muennighoff
+et al. (2023) find that up to four passes over the same data cost little against the same
+number of fresh tokens. The rule is applied by the sweep and the ablation; `python -m
 scaling_lm.train --epochs N` overrides it for one run.
 
     python -m scaling_lm.budget    # log the plan for every size from data/corpus_stats.json
@@ -30,6 +32,7 @@ from scaling_lm.config import (
     MIN_TOKENS_PER_PARAMETER,
     MODEL_SIZES,
     MODEL_SIZES_BY_NAME,
+    REPETITION_TOLERANCE,
     ModelSize,
     TrainingConfig,
 )
@@ -48,6 +51,7 @@ class TokenBudget:
     tokens_per_epoch: int
     epochs: int
     target_tokens_per_parameter: float
+    repetition_tolerance: float
 
     @property
     def tokens_seen(self) -> int:
@@ -64,6 +68,22 @@ class TokenBudget:
     @property
     def meets_target(self) -> bool:
         return self.tokens_per_parameter >= self.target_tokens_per_parameter
+
+    @property
+    def within_tolerance(self) -> bool:
+        """Not clearly short of the target after training: at or above the repeat threshold."""
+        threshold = repetition_threshold(
+            self.target_tokens_per_parameter, self.repetition_tolerance
+        )
+        return self.tokens_per_parameter >= threshold
+
+    @property
+    def target_status(self) -> str:
+        if self.meets_target:
+            return "yes"
+        if self.within_tolerance:
+            return f"no, within {self.repetition_tolerance:.0%}"
+        return "no"
 
 
 def steps_per_epoch(train_window_count: int, training: TrainingConfig) -> int:
@@ -90,19 +110,39 @@ def non_embedding_parameter_count(size: ModelSize) -> int:
     return model.count_parameters()["non_embedding"]
 
 
+def repetition_threshold(
+    target_tokens_per_parameter: float = MIN_TOKENS_PER_PARAMETER,
+    tolerance: float = REPETITION_TOLERANCE,
+) -> float:
+    """Tokens per parameter below which one pass counts as clearly short of the target."""
+    require_positive("target_tokens_per_parameter", target_tokens_per_parameter)
+    if not 0 <= tolerance < 1:
+        raise ValueError(f"tolerance must lie in [0, 1), got {tolerance}")
+    return target_tokens_per_parameter * (1 - tolerance)
+
+
 def planned_epochs(
     epoch_tokens: int,
     non_embedding_params: int,
     target_tokens_per_parameter: float = MIN_TOKENS_PER_PARAMETER,
     max_epochs: int = MAX_EPOCHS,
+    tolerance: float = REPETITION_TOLERANCE,
 ) -> int:
-    """Fewest passes that reach the target tokens per parameter, or `max_epochs` if none does."""
+    """Passes for one size: one, unless a single pass falls clearly short of the target.
+
+    The target is a soft floor. A one-pass ratio within `tolerance` (a fraction of the
+    target) below it is a borderline case, not severe under-training, and stays at one
+    pass. A size clearly below it takes the fewest passes that reach the target itself,
+    or `max_epochs` if none does.
+    """
     require_positive("epoch_tokens", epoch_tokens)
     require_positive("non_embedding_params", non_embedding_params)
-    require_positive("target_tokens_per_parameter", target_tokens_per_parameter)
     require_positive("max_epochs", max_epochs)
-    for epochs in range(1, max_epochs + 1):
-        if epochs * epoch_tokens / non_embedding_params >= target_tokens_per_parameter:
+    one_pass = epoch_tokens / non_embedding_params
+    if one_pass >= repetition_threshold(target_tokens_per_parameter, tolerance):
+        return 1
+    for epochs in range(2, max_epochs + 1):
+        if epochs * one_pass >= target_tokens_per_parameter:
             return epochs
     return max_epochs
 
@@ -121,6 +161,7 @@ def token_budget(size_name: str, train_window_count: int, training: TrainingConf
         tokens_per_epoch=epoch_tokens,
         epochs=planned_epochs(epoch_tokens, parameter_count),
         target_tokens_per_parameter=MIN_TOKENS_PER_PARAMETER,
+        repetition_tolerance=REPETITION_TOLERANCE,
     )
 
 
@@ -146,7 +187,7 @@ def budget_table(budgets: Sequence[TokenBudget]) -> list[str]:
             f"| {budget.model_size} | {budget.non_embedding_params:,} | "
             f"{budget.one_epoch_tokens_per_parameter:.1f} | {budget.epochs} | "
             f"{budget.tokens_seen:,} | {budget.tokens_per_parameter:.1f} | "
-            f"{'yes' if budget.meets_target else 'no'} |"
+            f"{budget.target_status} |"
         )
     return lines
 
@@ -158,9 +199,10 @@ def main() -> None:
         token_budget(size.name, train_window_count, DEFAULT_TRAINING_CONFIG) for size in MODEL_SIZES
     ]
     logger.info(
-        "Target %.0f tokens per non-embedding parameter, at most %d epochs; one pass is "
-        "%s training tokens.",
+        "Target %.0f tokens per non-embedding parameter; sizes below %.2f after one pass "
+        "repeat, at most %d epochs; one pass is %s training tokens.",
         MIN_TOKENS_PER_PARAMETER,
+        repetition_threshold(),
         MAX_EPOCHS,
         f"{budgets[0].tokens_per_epoch:,}",
     )

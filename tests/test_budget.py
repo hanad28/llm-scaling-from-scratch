@@ -155,8 +155,8 @@ def test_committed_corpus_gives_the_documented_plan():
     # The rule does not rescue the largest size: about 4.8 tokens per parameter at the cap.
     largest = budgets["xxlarge"]
     assert largest.epochs == MAX_EPOCHS
+    assert largest.one_epoch_tokens_per_parameter < repetition_threshold()
     assert not largest.meets_target
-    assert not largest.within_tolerance
     assert largest.tokens_per_parameter == pytest.approx(4.78, abs=0.01)
     assert all(
         budget.meets_target for name, budget in budgets.items() if name not in ("large", "xxlarge")

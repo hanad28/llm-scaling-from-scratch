@@ -23,12 +23,14 @@ from scaling_lm.ablation import (
     analyse_ablation,
     read_ablation_manifest,
 )
+from scaling_lm.budget import repetition_threshold
 from scaling_lm.config import (
     CORPUS_STATS_PATH,
     DEFAULT_POSITIONAL_SCHEME,
     KAPLAN_ALPHA_N,
     MAX_EPOCHS,
     MIN_TOKENS_PER_PARAMETER,
+    REPETITION_TOLERANCE,
     ResultsPaths,
 )
 from scaling_lm.plots import plot_ablation, plot_scaling_law, plot_training_curves
@@ -116,18 +118,33 @@ def sweep_section(results: Sequence[RunResult]) -> list[str]:
 
 
 def data_constraint_note(results: Sequence[RunResult]) -> list[str]:
-    """Say which sizes repeated the corpus and which still fall short of the target."""
+    """Which sizes repeated the corpus, which were left a little under the target at one
+    pass, and which are still under it after training."""
+    threshold = repetition_threshold()
     repeated = [result.model_size for result in results if result.epochs > 1]
+    borderline = [
+        result.model_size
+        for result in results
+        if result.epochs == 1
+        and threshold <= tokens_per_parameter(result) < MIN_TOKENS_PER_PARAMETER
+    ]
     short = [
         result.model_size
         for result in results
         if tokens_per_parameter(result) < MIN_TOKENS_PER_PARAMETER
+        and result.model_size not in borderline
     ]
     lines = [
-        f"Sizes below {MIN_TOKENS_PER_PARAMETER:.0f} tokens per non-embedding parameter after "
-        f"one pass repeat the corpus, up to {MAX_EPOCHS} epochs (Muennighoff et al., 2023). "
+        f"Sizes clearly below {MIN_TOKENS_PER_PARAMETER:.0f} tokens per non-embedding parameter "
+        f"after one pass (under {threshold:.2f}, that is more than {REPETITION_TOLERANCE:.0%} "
+        f"short) repeat the corpus, up to {MAX_EPOCHS} epochs (Muennighoff et al., 2023). "
         + (f"Repeated here: {', '.join(repeated)}." if repeated else "No size needed to.")
     ]
+    if borderline:
+        lines.append(
+            f"Within {REPETITION_TOLERANCE:.0%} of the target and left at one pass: "
+            f"{', '.join(borderline)}."
+        )
     if short:
         lines.append(
             f"Still below the target after training: {', '.join(short)}. Those points are trained "

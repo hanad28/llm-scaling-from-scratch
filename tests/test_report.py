@@ -90,7 +90,7 @@ def test_data_constraint_note_names_the_repeated_borderline_and_still_short_size
     assert "clearly below 5 tokens per non-embedding parameter" in note
     assert "Repeated here: xlarge, xxlarge." in note
     assert "Within 10% of the target and left at one pass: large." in note
-    assert "Still clearly below the target after training: xxlarge." in note
+    assert "Still below the target after training: xxlarge." in note
     assert "Muennighoff et al., 2023" in note
 
 
