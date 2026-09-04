@@ -166,6 +166,14 @@ KAPLAN_LR_SLOPE = -0.0001395
 FINAL_LR_FRACTION = 0.1
 WARMUP_FRACTION = 0.05
 
+# One pass over the corpus gives every size the same tokens, so tokens per non-embedding
+# parameter falls as the model grows. A size that would see fewer than this many in one
+# pass repeats the corpus (budget.py), up to MAX_EPOCHS passes: Muennighoff et al. (2023)
+# find up to four passes over the same data cost little against the same number of fresh
+# tokens. The largest sizes stay below the target even at the cap; see README.
+MIN_TOKENS_PER_PARAMETER = 5.0
+MAX_EPOCHS = 4
+
 
 # Marks the TrainingConfig fields a command line may set per invocation. When a saved
 # run is re-checked by name, only these are taken from the saved record; every other

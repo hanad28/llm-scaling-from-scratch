@@ -24,7 +24,7 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
-from scaling_lm.budget import steps_per_epoch
+from scaling_lm.budget import steps_per_epoch, token_budget
 from scaling_lm.config import (
     MODEL_SIZES_BY_NAME,
     POSITIONAL_SCHEMES,
@@ -340,6 +340,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-size", required=True, choices=sorted(MODEL_SIZES_BY_NAME))
     parser.add_argument("--positional", default="learned", choices=POSITIONAL_SCHEMES)
     parser.add_argument("--seed", type=non_negative_int, default=0)
+    parser.add_argument(
+        "--epochs",
+        type=positive_int,
+        default=None,
+        help="passes over the training split; default: the per-size rule in budget.py",
+    )
     add_training_arguments(parser)
     return parser.parse_args()
 
@@ -347,11 +353,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args()
+    training = training_config_from_args(args)
+    epochs = args.epochs
+    if epochs is None:
+        epochs = token_budget(args.model_size, len(TokenWindows("train")), training).epochs
     run_config = RunConfig(
         model_size=args.model_size,
         positional_scheme=args.positional,
         seed=args.seed,
-        training=training_config_from_args(args),
+        training=training,
+        epochs=epochs,
     )
     train_or_load(run_config, ResultsPaths(args.results_dir))
 
