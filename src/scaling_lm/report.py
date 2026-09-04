@@ -130,7 +130,7 @@ def data_constraint_note(results: Sequence[RunResult]) -> list[str]:
     ]
     if short:
         lines.append(
-            f"Still below the target at the cap: {', '.join(short)}. Those points are trained "
+            f"Still below the target after training: {', '.join(short)}. Those points are trained "
             "in a more data-constrained regime than the rest, and the fit treats them the same."
         )
     return lines

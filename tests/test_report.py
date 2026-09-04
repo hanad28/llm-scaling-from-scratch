@@ -87,7 +87,7 @@ def test_sweep_table_reports_epochs_and_tokens_per_parameter():
 def test_data_constraint_note_names_the_repeated_and_still_short_sizes():
     note = " ".join(data_constraint_note(sweep_results()))
     assert "Repeated here: large, xlarge, xxlarge." in note
-    assert "Still below the target at the cap: xxlarge." in note
+    assert "Still below the target after training: xxlarge." in note
     assert "Muennighoff et al., 2023" in note
 
 
