@@ -24,7 +24,7 @@ import json
 import logging
 import os
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import MISSING, asdict, dataclass, field, fields
 from pathlib import Path
 
 import torch
@@ -178,9 +178,28 @@ def write_atomically(final_path: Path, write: Callable[[Path], None]) -> None:
         raise
 
 
+def required_result_fields() -> set[str]:
+    return {
+        result_field.name
+        for result_field in fields(RunResult)
+        if result_field.default is MISSING and result_field.default_factory is MISSING
+    }
+
+
 def read_result(run_name: str, paths: ResultsPaths) -> RunResult:
-    """Parse a result.json without checking it. Only `verify_result` callers should use this."""
+    """Parse a result.json without checking it. Only `verify_result` callers should use this.
+
+    A record written by an older version of the code, which did not know about a field the
+    current RunResult requires, is stale rather than malformed: it is reported like any
+    other stale run instead of failing inside the dataclass constructor.
+    """
     payload = json.loads((paths.run_directory(run_name) / RESULT_FILENAME).read_text())
+    missing = sorted(required_result_fields() - payload.keys())
+    if missing:
+        raise StaleRunError(
+            f"{result_path(run_name, paths)} was written by an older version of the code and "
+            f"lacks {missing}. Delete the run directory or use another --results-dir"
+        )
     payload["history"] = [EvalPoint(**point) for point in payload["history"]]
     payload["identity"] = RunIdentity(**payload["identity"])
     return RunResult(**payload)
