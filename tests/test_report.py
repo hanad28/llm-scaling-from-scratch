@@ -17,6 +17,7 @@ from scaling_lm.config import (
     RunConfig,
     TrainingConfig,
 )
+from scaling_lm.plots import training_curve_label, training_curves_title
 from scaling_lm.report import (
     data_constraint_note,
     fit_section,
@@ -136,3 +137,14 @@ def test_seed_variance_section_says_when_the_spread_is_unmeasured(seed_losses):
     assert seed_spread_of_sweep_scheme(ablation) is None
     text = "\n".join(seed_variance_section(results, fit, ablation))
     assert "no measurement of this spread" in text
+
+
+def test_training_curve_labels_carry_each_models_epoch_count():
+    results = sweep_results()
+    labels = [training_curve_label(result) for result in results]
+    assert labels[0] == "tiny (0.8M, 1 pass)"
+    assert labels[4] == "xlarge (49.2M, 3 passes)"
+    assert labels[5] == "xxlarge (99.2M, 4 passes)"
+    assert training_curves_title(results) == "Validation loss during training (1 to 4 passes)"
+    assert training_curves_title(results[:3]) == "Validation loss during the single training pass"
+    assert "single" not in training_curves_title(results[5:])
