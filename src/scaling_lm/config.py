@@ -137,12 +137,14 @@ class ModelSize:
 
 # Head dimension is fixed at 64 and the MLP ratio at 4, so width and depth are
 # the only things that change. d_model / n_layer stays in the 32 to 64 band.
+# Roughly log-spaced from 0.8M to 99M non-embedding parameters, in ascending order.
 MODEL_SIZES: tuple[ModelSize, ...] = (
     ModelSize(name="tiny", n_layer=4, d_model=128),
     ModelSize(name="small", n_layer=6, d_model=256),
     ModelSize(name="medium", n_layer=7, d_model=384),
     ModelSize(name="large", n_layer=8, d_model=512),
-    ModelSize(name="xlarge", n_layer=14, d_model=768),
+    ModelSize(name="xlarge", n_layer=10, d_model=640),
+    ModelSize(name="xxlarge", n_layer=14, d_model=768),
 )
 MODEL_SIZES_BY_NAME = {size.name: size for size in MODEL_SIZES}
 
