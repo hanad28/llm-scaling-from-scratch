@@ -12,7 +12,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from scaling_lm.runs import RunResult  # noqa: E402
+from scaling_lm.runs import (  # noqa: E402
+    RunResult,
+    describe_passes,
+    format_epochs,
+    planned_epochs_of,
+    stopped_early,
+)
 from scaling_lm.scaling_fit import PowerLawFit  # noqa: E402
 
 FIGURE_DPI = 150
@@ -72,20 +78,30 @@ def plot_scaling_law(
 
 
 def training_curve_label(result: RunResult) -> str:
-    """Legend entry naming the size, its parameter count and how many passes it trained for."""
-    passes = "pass" if result.epochs == 1 else "passes"
+    """Legend entry: size, parameter count and the passes made (as a fraction of the plan if
+    max_steps cut the run short)."""
     non_embedding_millions = result.parameters["non_embedding"] / 1e6
-    return f"{result.model_size} ({non_embedding_millions:.1f}M, {result.epochs} {passes})"
+    return f"{result.model_size} ({non_embedding_millions:.1f}M, {describe_passes(result)})"
+
+
+def epoch_range(epoch_counts: Sequence[float]) -> str:
+    """`3`, or `1 to 4` when the counts differ."""
+    low, high = min(epoch_counts), max(epoch_counts)
+    return format_epochs(low) if low == high else f"{format_epochs(low)} to {format_epochs(high)}"
 
 
 def training_curves_title(results: Sequence[RunResult]) -> str:
-    """State the range of pass counts in the figure, rather than assuming one pass for all."""
-    epoch_counts = {result.epochs for result in results}
-    if epoch_counts == {1}:
+    """State the range of passes actually made, and say so if max_steps stopped any run early."""
+    planned = [planned_epochs_of(result) for result in results]
+    if any(stopped_early(result) for result in results):
+        completed = [result.epochs_completed for result in results]
+        return (
+            f"Validation loss during training, cut short by max_steps "
+            f"({epoch_range(completed)} of {epoch_range(planned)} planned passes)"
+        )
+    if set(planned) == {1}:
         return "Validation loss during the single training pass"
-    if len(epoch_counts) == 1:
-        return f"Validation loss during training ({epoch_counts.pop()} passes)"
-    return f"Validation loss during training ({min(epoch_counts)} to {max(epoch_counts)} passes)"
+    return f"Validation loss during training ({epoch_range(planned)} passes)"
 
 
 def plot_training_curves(results: Sequence[RunResult], output_path: Path) -> None:

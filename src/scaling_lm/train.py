@@ -136,6 +136,14 @@ def planned_steps(train_window_count: int, config: TrainingConfig, epochs: int =
     return total_steps
 
 
+def epochs_completed(total_steps: int, epoch_length: int) -> float:
+    """Passes actually made, as a fraction of `epoch_length` steps; whole when the plan ran out."""
+    require_positive("epoch_length", epoch_length)
+    if total_steps < 0:
+        raise ValueError(f"total_steps must be non-negative, got {total_steps}")
+    return total_steps / epoch_length
+
+
 def train_step(
     model: nn.Module,
     optimizer: torch.optim.AdamW,
@@ -240,6 +248,16 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
             logger.info("step %d validation loss %.4f", step, validation_loss)
 
     wall_time = time.time() - start_time
+    completed = epochs_completed(total_steps, epoch_length)
+    if completed < run_config.epochs:
+        logger.info(
+            "%s: max_steps=%s stopped training after %.3g of %d passes (%d steps per pass)",
+            run_config.run_name,
+            config.max_steps,
+            completed,
+            run_config.epochs,
+            epoch_length,
+        )
     final_validation = evaluate(
         forward_model,
         validation_windows,
@@ -271,7 +289,7 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
         seed=run_config.seed,
         parameters=parameter_counts,
         identity=identity,
-        epochs=run_config.epochs,
+        epochs_completed=completed,
         total_steps=total_steps,
         tokens_seen=total_steps * config.tokens_per_step,
         peak_learning_rate=peak_lr,

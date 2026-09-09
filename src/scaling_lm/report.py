@@ -34,7 +34,14 @@ from scaling_lm.config import (
     ResultsPaths,
 )
 from scaling_lm.plots import plot_ablation, plot_scaling_law, plot_training_curves
-from scaling_lm.runs import RunResult, load_run
+from scaling_lm.runs import (
+    RunResult,
+    describe_passes,
+    epochs_summary,
+    load_run,
+    planned_epochs_of,
+    stopped_early,
+)
 from scaling_lm.scaling_fit import PowerLawFit, alpha_std_from_loss_noise, fit_power_law
 from scaling_lm.sweep import read_sweep_manifest
 
@@ -107,7 +114,7 @@ def sweep_section(results: Sequence[RunResult]) -> list[str]:
         lines.append(
             f"| {result.model_size} | {architecture['n_layer']} | {architecture['d_model']} | "
             f"{architecture['n_head']} | {format_millions(result.parameters['non_embedding'])} | "
-            f"{format_millions(result.parameters['total'])} | {result.epochs} | "
+            f"{format_millions(result.parameters['total'])} | {epochs_summary(result)} | "
             f"{format_int(result.total_steps)} | {format_millions(result.tokens_seen)} | "
             f"{tokens_per_parameter(result):.1f} | {result.peak_learning_rate:.2e} | "
             f"{result.final_validation_loss:.4f} | {result.final_test_loss:.4f} | "
@@ -119,13 +126,13 @@ def sweep_section(results: Sequence[RunResult]) -> list[str]:
 
 def data_constraint_note(results: Sequence[RunResult]) -> list[str]:
     """Which sizes repeated the corpus, which were left a little under the target at one
-    pass, and which are still under it after training."""
+    pass, which are still under it after training, and which max_steps cut short."""
     threshold = repetition_threshold()
-    repeated = [result.model_size for result in results if result.epochs > 1]
+    repeated = [result.model_size for result in results if planned_epochs_of(result) > 1]
     borderline = [
         result.model_size
         for result in results
-        if result.epochs == 1
+        if planned_epochs_of(result) == 1
         and threshold <= tokens_per_parameter(result) < MIN_TOKENS_PER_PARAMETER
     ]
     short = [
@@ -149,6 +156,16 @@ def data_constraint_note(results: Sequence[RunResult]) -> list[str]:
         lines.append(
             f"Still below the target after training: {', '.join(short)}. Those points are trained "
             "in a more data-constrained regime than the rest, and the fit treats them the same."
+        )
+    cut_short = [
+        f"{result.model_size} ({describe_passes(result)})"
+        for result in results
+        if stopped_early(result)
+    ]
+    if cut_short:
+        lines.append(
+            f"Stopped early by max_steps, so tokens seen and tokens per parameter above are "
+            f"what was reached, not the plan: {', '.join(cut_short)}."
         )
     return lines
 

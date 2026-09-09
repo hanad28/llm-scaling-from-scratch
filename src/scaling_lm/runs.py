@@ -66,6 +66,12 @@ class RunResult:
     `identity` is `run_identity(run_config)` as computed when training started; it is the
     only record of what was trained. `final_validation_loss` and `final_test_loss` here
     are the only place a loss is read from.
+
+    `epochs_completed` is the number of passes over the training split the run actually
+    made, `total_steps / steps_per_epoch`. It equals the requested count (kept in the
+    identity's schedule, see `planned_epochs_of`) unless `max_steps` stopped the run
+    early, in which case it is the fraction reached, so a capped run never reads as a
+    finished one.
     """
 
     run_name: str
@@ -74,7 +80,7 @@ class RunResult:
     seed: int
     parameters: dict[str, int]
     identity: RunIdentity
-    epochs: int
+    epochs_completed: float
     total_steps: int
     tokens_seen: int
     peak_learning_rate: float
@@ -156,6 +162,34 @@ def run_config_of(result: RunResult) -> RunConfig:
         training=TrainingConfig(**training),
         epochs=schedule[EPOCHS_KEY],
     )
+
+
+def planned_epochs_of(result: RunResult) -> int:
+    """The epoch count the run was asked for, read from the identity it was trained under."""
+    return run_config_of(result).epochs
+
+
+def stopped_early(result: RunResult) -> bool:
+    return result.epochs_completed < planned_epochs_of(result)
+
+
+def format_epochs(epochs: float) -> str:
+    """`3` for a whole number of passes, otherwise three significant figures (`0.5`, `3.45e-05`)."""
+    return f"{epochs:.3g}"
+
+
+def epochs_summary(result: RunResult) -> str:
+    """`3`, or `0.5 of 3` when max_steps stopped the run before its planned passes."""
+    planned = planned_epochs_of(result)
+    if stopped_early(result):
+        return f"{format_epochs(result.epochs_completed)} of {planned}"
+    return str(planned)
+
+
+def describe_passes(result: RunResult) -> str:
+    """`epochs_summary` with its noun: `1 pass`, `3 passes`, `0.5 of 3 passes`."""
+    noun = "pass" if planned_epochs_of(result) == 1 else "passes"
+    return f"{epochs_summary(result)} {noun}"
 
 
 def result_path(run_name: str, paths: ResultsPaths) -> str:
