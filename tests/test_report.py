@@ -54,6 +54,20 @@ def sweep_results() -> list[RunResult]:
     return results
 
 
+CAPPED_FRACTION = 0.5
+
+
+def capped_sweep_results() -> list[RunResult]:
+    """The sweep with xxlarge stopped by max_steps halfway through its first of four passes."""
+    results = sweep_results()
+    results[-1] = replace(
+        results[-1],
+        epochs_completed=CAPPED_FRACTION,
+        tokens_seen=int(TOKENS_PER_EPOCH * CAPPED_FRACTION),
+    )
+    return results
+
+
 def ablation_report(seed_losses: list[float]):
     """Both ablation schemes over the same seeds, with these losses for the default scheme."""
     per_scheme = {
@@ -83,6 +97,21 @@ def test_sweep_table_reports_epochs_and_tokens_per_parameter():
     tiny_row = next(line for line in lines if line.startswith("| tiny |"))
     assert "| 1 |" in tiny_row
     assert "| 149.6 |" in tiny_row
+
+
+def test_sweep_table_shows_a_capped_run_as_a_fraction_of_its_plan():
+    lines = sweep_section(capped_sweep_results())
+    xxlarge_row = next(line for line in lines if line.startswith("| xxlarge |"))
+    assert "| 0.5 of 4 |" in xxlarge_row
+    assert "| 0.6 |" in xxlarge_row
+    assert "| 4 |" not in xxlarge_row
+    note = " ".join(lines)
+    assert "Stopped early by max_steps" in note
+    assert "xxlarge (0.5 of 4 passes)" in note
+
+
+def test_data_constraint_note_is_silent_about_max_steps_when_every_run_finished():
+    assert "max_steps" not in " ".join(data_constraint_note(sweep_results()))
 
 
 def test_data_constraint_note_names_the_repeated_borderline_and_still_short_sizes():
@@ -150,3 +179,12 @@ def test_training_curve_labels_carry_each_models_epoch_count():
     assert training_curves_title(results) == "Validation loss during training (1 to 4 passes)"
     assert training_curves_title(results[:3]) == "Validation loss during the single training pass"
     assert "single" not in training_curves_title(results[5:])
+
+
+def test_training_curve_labels_and_title_show_when_max_steps_cut_a_run_short():
+    results = capped_sweep_results()
+    assert training_curve_label(results[-1]) == "xxlarge (99.2M, 0.5 of 4 passes)"
+    title = training_curves_title(results)
+    assert "max_steps" in title
+    assert "1 to 4 passes" not in title
+    assert "single" not in training_curves_title([results[-1]])

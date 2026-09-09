@@ -17,6 +17,7 @@ from scaling_lm.runs import (
     StaleRunError,
     hash_specification,
     load_run,
+    planned_epochs_of,
     run_identity,
 )
 from scaling_lm.sweep import write_sweep_manifest
@@ -40,7 +41,7 @@ def make_result(run_config: RunConfig, validation_loss: float = 3.0) -> RunResul
         seed=run_config.seed,
         parameters={"total": 1, "embedding": 1, "non_embedding": 1},
         identity=run_identity(run_config),
-        epochs=run_config.epochs,
+        epochs_completed=float(run_config.epochs),
         total_steps=1,
         tokens_seen=1,
         peak_learning_rate=1e-3,
@@ -173,7 +174,8 @@ def test_load_run_restores_the_recorded_epoch_count(tmp_path):
     repeated = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4), epochs=3)
     write_result(make_result(repeated), paths)
     loaded = load_run(repeated.run_name, paths)
-    assert loaded.epochs == 3
+    assert planned_epochs_of(loaded) == 3
+    assert loaded.epochs_completed == 3.0
     assert loaded.identity == run_identity(repeated)
     assert loaded.identity != run_identity(RunConfig("tiny", "learned", 0, repeated.training))
 
@@ -195,7 +197,7 @@ def test_load_run_rejects_a_record_without_an_epoch_count(tmp_path):
 def write_pre_epoch_result(run_config: RunConfig, paths: ResultsPaths) -> None:
     """A result.json as PR1 wrote it: no epoch count anywhere, fingerprint consistent."""
     payload = asdict(make_result(run_config))
-    del payload["epochs"]
+    del payload["epochs_completed"]
     del payload["identity"]["specification"]["schedule"]["epochs"]
     payload["identity"]["fingerprint"] = hash_specification(payload["identity"]["specification"])
     run_dir = paths.run_directory(run_config.run_name)
@@ -207,7 +209,7 @@ def test_pre_epoch_result_is_stale_for_the_loader_not_a_type_error(tmp_path):
     paths = ResultsPaths(tmp_path)
     run_config = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4))
     write_pre_epoch_result(run_config, paths)
-    with pytest.raises(StaleRunError, match="epochs.*Delete the run directory"):
+    with pytest.raises(StaleRunError, match="epochs_completed.*Delete the run directory"):
         load_run(run_config.run_name, paths)
 
 
@@ -216,7 +218,7 @@ def test_pre_epoch_result_is_stale_for_a_new_request_not_a_type_error(tmp_path, 
     run_config = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4))
     write_pre_epoch_result(run_config, paths)
     monkeypatch.setattr(train_module, "train_run", lambda *_args: pytest.fail("trained"))
-    with pytest.raises(StaleRunError, match="epochs.*Delete the run directory"):
+    with pytest.raises(StaleRunError, match="epochs_completed.*Delete the run directory"):
         train_or_load(run_config, paths)
 
 

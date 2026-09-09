@@ -13,6 +13,7 @@ from scaling_lm import train
 from scaling_lm.budget import steps_per_epoch
 from scaling_lm.config import ResultsPaths, RunConfig, TrainingConfig
 from scaling_lm.dataset import TokenWindows, epoch_batches
+from scaling_lm.runs import planned_epochs_of, stopped_early
 
 BATCH_SIZE = 3
 FULL_BATCHES_PER_EPOCH = SYNTHETIC_WINDOWS // BATCH_SIZE
@@ -145,8 +146,27 @@ def test_two_epochs_double_the_steps_and_are_recorded(synthetic_corpus, tmp_path
     single = train.train_run(one_epoch, ResultsPaths(tmp_path / "one"))
     repeated = train.train_run(two_epochs, ResultsPaths(tmp_path / "two"))
     epoch_steps = steps_per_epoch(SYNTHETIC_WINDOWS, training)
-    assert (single.epochs, single.total_steps) == (1, epoch_steps)
-    assert (repeated.epochs, repeated.total_steps) == (2, 2 * epoch_steps)
+    assert (single.epochs_completed, single.total_steps) == (1.0, epoch_steps)
+    assert (repeated.epochs_completed, repeated.total_steps) == (2.0, 2 * epoch_steps)
     assert repeated.tokens_seen == 2 * single.tokens_seen
+    assert not stopped_early(single) and not stopped_early(repeated)
     assert repeated.history[-1].step == repeated.total_steps - 1
     assert repeated.identity != single.identity
+
+
+def test_a_run_capped_by_max_steps_records_the_fraction_it_completed(
+    synthetic_corpus, tmp_path, caplog
+):
+    epoch_steps = steps_per_epoch(SYNTHETIC_WINDOWS, SMOKE_TRAINING)
+    capped_steps = epoch_steps + 1
+    capped = replace(SMOKE_TRAINING, max_steps=capped_steps)
+    run_config = RunConfig("tiny", training=capped, epochs=3)
+    with caplog.at_level(logging.INFO, logger="scaling_lm.train"):
+        result = train.train_run(run_config, ResultsPaths(tmp_path))
+    assert result.total_steps == capped_steps
+    assert result.tokens_seen == capped_steps * capped.tokens_per_step
+    assert result.epochs_completed == pytest.approx(capped_steps / epoch_steps)
+    assert result.epochs_completed < run_config.epochs
+    assert planned_epochs_of(result) == run_config.epochs
+    assert stopped_early(result)
+    assert "max_steps" in caplog.text and "of 3 passes" in caplog.text

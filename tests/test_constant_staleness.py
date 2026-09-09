@@ -46,7 +46,7 @@ if {action!r} == "save":
         run_name=run_config.run_name, model_size="tiny", positional_scheme="rope", seed=0,
         parameters={{"total": 1, "embedding": 1, "non_embedding": 1}},
         identity=runs.run_identity(run_config),
-        epochs=1, total_steps=1, tokens_seen=1, peak_learning_rate=1e-3,
+        epochs_completed=1.0, total_steps=1, tokens_seen=1, peak_learning_rate=1e-3,
         final_validation_loss=3.0, final_test_loss=3.0, wall_time_seconds=1.0, device="cpu",
     )
     run_dir = paths.run_directory(run_config.run_name)
