@@ -96,7 +96,7 @@ def training_curves_title(results: Sequence[RunResult]) -> str:
     if any(stopped_early(result) for result in results):
         completed = [result.epochs_completed for result in results]
         return (
-            f"Validation loss during training, cut short by max_steps "
+            f"Validation loss during training, cut short by max_steps\n"
             f"({epoch_range(completed)} of {epoch_range(planned)} planned passes)"
         )
     if set(planned) == {1}:
