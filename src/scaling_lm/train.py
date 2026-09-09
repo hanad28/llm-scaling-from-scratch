@@ -251,11 +251,12 @@ def train_run(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
     completed = epochs_completed(total_steps, epoch_length)
     if completed < run_config.epochs:
         logger.info(
-            "%s: max_steps=%s stopped training after %.3g of %d passes (%d steps per pass)",
+            "%s: max_steps=%s stopped training after %.3g of %d planned %s (%d steps per pass)",
             run_config.run_name,
             config.max_steps,
             completed,
             run_config.epochs,
+            "pass" if run_config.epochs == 1 else "passes",
             epoch_length,
         )
     final_validation = evaluate(

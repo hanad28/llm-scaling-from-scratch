@@ -169,4 +169,4 @@ def test_a_run_capped_by_max_steps_records_the_fraction_it_completed(
     assert result.epochs_completed < run_config.epochs
     assert planned_epochs_of(result) == run_config.epochs
     assert stopped_early(result)
-    assert "max_steps" in caplog.text and "of 3 passes" in caplog.text
+    assert "max_steps" in caplog.text and "of 3 planned passes" in caplog.text
