@@ -15,6 +15,11 @@ module assembles or hashes a specification (tests/test_single_source.py enforces
 Every reader of a result.json goes through `verify_result`, via either `resolve_run`
 (a requested RunConfig, used before training) or `load_run` (a run name, used by report
 and generate). Losses are read from the RunResult those return and from nowhere else.
+
+`resolve_run` answers "is this exactly the run asked for?"; it says nothing about
+whether that run finished. `reject_partial_reuse` is the second, independent check
+`train_or_load` layers on top: a full (uncapped) request never gets back a partial
+result silently, only with an explicit `--allow-partial`.
 """
 
 from __future__ import annotations
@@ -93,6 +98,10 @@ class RunResult:
 
 class StaleRunError(RuntimeError):
     """A result.json exists for the run name but was produced by a different run."""
+
+
+class PartialRunReuseError(RuntimeError):
+    """A saved result is a partial run (max_steps cut it short) but a full run was asked for."""
 
 
 def hash_specification(specification: dict[str, object]) -> str:
@@ -288,3 +297,28 @@ def load_run(run_name: str, paths: ResultsPaths) -> RunResult:
     """Load a finished run by name, checking it against the current code and corpus."""
     result = read_result(run_name, paths)
     return verify_result(result, run_config_of(result), paths)
+
+
+def reject_partial_reuse(
+    result: RunResult, run_config: RunConfig, paths: ResultsPaths, allow_partial: bool
+) -> None:
+    """Refuse a partial `result` when `run_config` asks for a full (uncapped) run.
+
+    `resolve_run` already checked that `result` is an exact fingerprint match for
+    `run_config`; that identity check does not by itself say whether the saved run
+    actually finished its planned passes, only that nothing about the request has
+    changed. This is a second, independent check, on `epochs_completed` against the
+    plan rather than on identity, so a partial result cannot be handed back as if it
+    were the finished run a full request asked for, however it came to be on disk (a
+    genuinely interrupted run, or a result.json placed there by another process). A
+    request that itself caps `max_steps` is not asking for a full run, so it is exempt:
+    reusing a matching capped result under the same cap is the intended resumption path.
+    """
+    if run_config.training.max_steps is not None or allow_partial:
+        return
+    if stopped_early(result):
+        raise PartialRunReuseError(
+            f"{result_path(run_config.run_name, paths)} is a partial result "
+            f"({epochs_summary(result)}), but a full run was requested. Pass --allow-partial "
+            "to reuse it anyway, or delete the run directory to retrain."
+        )

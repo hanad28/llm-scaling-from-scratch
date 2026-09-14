@@ -41,6 +41,7 @@ from scaling_lm.runs import (
     RunResult,
     describe_device,
     load_run,
+    reject_partial_reuse,
     resolve_run,
     run_identity,
     select_device,
@@ -315,10 +316,20 @@ def save_run(model: GPT, result: RunResult, output_dir: Path) -> None:
     )
 
 
-def train_or_load(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
-    """Return the verified saved result for this run, training it first if there is none."""
+def train_or_load(
+    run_config: RunConfig, paths: ResultsPaths, allow_partial: bool = False
+) -> RunResult:
+    """Return the verified saved result for this run, training it first if there is none.
+
+    A saved result that only made part of its planned passes (`max_steps` cut it short)
+    is not handed back for a full request unless `allow_partial` says to; see
+    `runs.reject_partial_reuse`.
+    """
     existing = resolve_run(run_config, paths)
-    return existing if existing is not None else train_run(run_config, paths)
+    if existing is None:
+        return train_run(run_config, paths)
+    reject_partial_reuse(existing, run_config, paths, allow_partial)
+    return existing
 
 
 def load_model_from_result(result: RunResult, paths: ResultsPaths, device: torch.device) -> GPT:
@@ -350,6 +361,12 @@ def add_training_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--eval-interval", type=positive_int, default=defaults.eval_interval_steps)
     parser.add_argument("--no-mixed-precision", action="store_true")
     parser.add_argument("--compile", action="store_true")
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="reuse a saved result that only made part of its planned passes, for a full "
+        "(uncapped) request; without this, such a mismatch is an error",
+    )
 
 
 def training_config_from_args(args: argparse.Namespace) -> TrainingConfig:
@@ -392,7 +409,7 @@ def main() -> None:
         training=training,
         epochs=epochs,
     )
-    train_or_load(run_config, ResultsPaths(args.results_dir))
+    train_or_load(run_config, ResultsPaths(args.results_dir), allow_partial=args.allow_partial)
 
 
 if __name__ == "__main__":

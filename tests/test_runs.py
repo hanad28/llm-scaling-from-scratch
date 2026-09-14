@@ -13,6 +13,7 @@ from scaling_lm.model import GPTConfig
 from scaling_lm.report import build_report
 from scaling_lm.runs import (
     RESULT_FILENAME,
+    PartialRunReuseError,
     RunResult,
     StaleRunError,
     hash_specification,
@@ -260,6 +261,55 @@ def test_load_run_rejects_edited_result_file(saved_run):
     result_file.write_text(json.dumps(payload))
     with pytest.raises(StaleRunError, match="edited after training"):
         load_run(run_config.run_name, paths)
+
+
+def make_partial_result(run_config: RunConfig, completed_epochs: float) -> RunResult:
+    """A saved result whose identity matches `run_config` exactly but which stopped early."""
+    result = make_result(run_config)
+    result.epochs_completed = completed_epochs
+    return result
+
+
+def test_train_or_load_rejects_a_partial_result_for_a_full_request(tmp_path, monkeypatch):
+    paths = ResultsPaths(tmp_path)
+    # No max_steps: this run_config asks for a full, uncapped run.
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(), epochs=3)
+    write_result(make_partial_result(run_config, completed_epochs=1.0), paths)
+
+    def refuse_to_train(*_args: object) -> RunResult:
+        raise AssertionError("train_run should not be called when a matching result exists")
+
+    monkeypatch.setattr(train_module, "train_run", refuse_to_train)
+    with pytest.raises(PartialRunReuseError, match="partial result.*1 of 3.*--allow-partial"):
+        train_or_load(run_config, paths)
+
+
+def test_train_or_load_reuses_a_partial_result_with_allow_partial(tmp_path, monkeypatch):
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(), epochs=3)
+    write_result(make_partial_result(run_config, completed_epochs=1.0), paths)
+    monkeypatch.setattr(train_module, "train_run", lambda *_args: pytest.fail("should not retrain"))
+    reused = train_or_load(run_config, paths, allow_partial=True)
+    assert reused.epochs_completed == 1.0
+
+
+def test_train_or_load_accepts_a_partial_result_when_the_request_is_itself_capped(
+    tmp_path, monkeypatch
+):
+    """A request that itself sets max_steps is not asking for a full run, so no override."""
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4), epochs=3)
+    write_result(make_partial_result(run_config, completed_epochs=1.0), paths)
+    monkeypatch.setattr(train_module, "train_run", lambda *_args: pytest.fail("should not retrain"))
+    assert train_or_load(run_config, paths).epochs_completed == 1.0
+
+
+def test_train_or_load_accepts_a_result_that_finished_its_plan(tmp_path, monkeypatch):
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(), epochs=3)
+    write_result(make_partial_result(run_config, completed_epochs=3.0), paths)
+    monkeypatch.setattr(train_module, "train_run", lambda *_args: pytest.fail("should not retrain"))
+    assert train_or_load(run_config, paths).epochs_completed == 3.0
 
 
 def test_report_loads_runs_through_the_shared_check(tmp_path, monkeypatch):

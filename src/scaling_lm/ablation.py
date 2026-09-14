@@ -158,6 +158,7 @@ def run_ablation(
     training: TrainingConfig,
     paths: ResultsPaths,
     model_size: str = ABLATION_MODEL_SIZE,
+    allow_partial: bool = False,
 ) -> AblationAnalysis:
     """Train every (scheme, seed) pair, write the manifest and return the analysis."""
     require_unique("seeds", list(seeds))
@@ -172,7 +173,9 @@ def run_ablation(
                 training=training,
                 epochs=epochs,
             )
-            per_scheme.setdefault(scheme, []).append(train_or_load(run_config, paths))
+            per_scheme.setdefault(scheme, []).append(
+                train_or_load(run_config, paths, allow_partial)
+            )
 
     manifest = AblationManifest(
         model_size=model_size,
@@ -209,6 +212,7 @@ def main() -> None:
         training_config_from_args(args),
         ResultsPaths(args.results_dir),
         model_size=args.model_size,
+        allow_partial=args.allow_partial,
     )
 
 

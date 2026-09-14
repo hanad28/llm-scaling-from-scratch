@@ -72,7 +72,10 @@ def sweep_run_config(
 
 
 def run_sweep(
-    size_names: Sequence[str], training: TrainingConfig, paths: ResultsPaths
+    size_names: Sequence[str],
+    training: TrainingConfig,
+    paths: ResultsPaths,
+    allow_partial: bool = False,
 ) -> list[RunResult]:
     """Train the requested sizes in order and write results/scaling_sweep.json."""
     require_unique("sizes", list(size_names))
@@ -81,7 +84,7 @@ def run_sweep(
     for size_name in size_names:
         run_config = sweep_run_config(size_name, training, train_window_count)
         logger.info("%s: %d epoch(s) planned", run_config.run_name, run_config.epochs)
-        results.append(train_or_load(run_config, paths))
+        results.append(train_or_load(run_config, paths, allow_partial))
     write_sweep_manifest(results, paths)
     return results
 
@@ -101,7 +104,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args()
-    run_sweep(args.sizes, training_config_from_args(args), ResultsPaths(args.results_dir))
+    run_sweep(
+        args.sizes,
+        training_config_from_args(args),
+        ResultsPaths(args.results_dir),
+        allow_partial=args.allow_partial,
+    )
 
 
 if __name__ == "__main__":
