@@ -12,16 +12,17 @@ import shutil
 from pathlib import Path
 
 import pytest
-from conftest import SMOKE_TRAINING
+from conftest import SMOKE_TRAINING, SYNTHETIC_WINDOWS
 
 import scaling_lm
 from scaling_lm import report as report_module
 from scaling_lm.ablation import run_ablation
+from scaling_lm.budget import token_budget
 from scaling_lm.config import ABLATION_POSITIONAL_SCHEMES, ResultsPaths, RunConfig
 from scaling_lm.report import build_report
 from scaling_lm.runs import resolve_run
 from scaling_lm.scaling_fit import fit_power_law
-from scaling_lm.sweep import run_sweep
+from scaling_lm.sweep import run_sweep, sweep_run_config
 from scaling_lm.train import train_run
 
 PACKAGE_DIR = Path(scaling_lm.__file__).parent
@@ -132,7 +133,9 @@ def test_report_fits_the_loss_in_result_json_not_a_copy_in_the_sweep_file(
 ):
     paths = ResultsPaths(tmp_path)
     run_sweep(SWEEP_SIZES, SMOKE_TRAINING, paths)
-    sweep_configs = [RunConfig(size, training=SMOKE_TRAINING) for size in SWEEP_SIZES]
+    sweep_configs = [
+        sweep_run_config(size, SMOKE_TRAINING, SYNTHETIC_WINDOWS) for size in SWEEP_SIZES
+    ]
     stale_loss = recorded_loss(sweep_configs[0], paths)
 
     fresh_loss = retrain(sweep_configs[0], paths, synthetic_corpus, seed=1)
@@ -156,7 +159,10 @@ def test_report_reads_ablation_losses_through_load_run(
     run_sweep(SWEEP_SIZES, SMOKE_TRAINING, paths)
     run_ablation(ABLATION_SEEDS, SMOKE_TRAINING, paths, model_size="tiny")
     baseline_scheme, alternative_scheme = ABLATION_POSITIONAL_SCHEMES
-    regenerated = RunConfig("tiny", alternative_scheme, ABLATION_SEEDS[-1], SMOKE_TRAINING)
+    epochs = token_budget("tiny", SYNTHETIC_WINDOWS, SMOKE_TRAINING).epochs
+    regenerated = RunConfig(
+        "tiny", alternative_scheme, ABLATION_SEEDS[-1], SMOKE_TRAINING, epochs=epochs
+    )
     stale_loss = recorded_loss(regenerated, paths)
     fresh_loss = retrain(regenerated, paths, synthetic_corpus, seed=1)
     assert fresh_loss != stale_loss
@@ -172,7 +178,7 @@ def test_report_reads_ablation_losses_through_load_run(
     build_report(paths, title="test")
 
     ablation_names = {
-        RunConfig("tiny", scheme, seed, SMOKE_TRAINING).run_name
+        RunConfig("tiny", scheme, seed, SMOKE_TRAINING, epochs=epochs).run_name
         for scheme in (baseline_scheme, alternative_scheme)
         for seed in ABLATION_SEEDS
     }

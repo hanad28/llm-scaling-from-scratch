@@ -20,11 +20,14 @@ from scaling_lm.config import (
     ResultsPaths,
 )
 from scaling_lm.model import GPT
-from scaling_lm.runs import select_device
+from scaling_lm.runs import load_run, select_device
 from scaling_lm.sweep import read_sweep_manifest
 from scaling_lm.tokenizer import load_tokenizer
-from scaling_lm.train import load_model
+from scaling_lm.train import load_model_from_result
 from scaling_lm.validation import require_positive, require_unique
+
+FINGERPRINT_KEY = "fingerprint"
+SAMPLES_KEY = "samples"
 
 logger = logging.getLogger(__name__)
 
@@ -50,20 +53,30 @@ def generate_continuation(
     return tokenizer.decode(output_ids[0].tolist())
 
 
-def generate_for_runs(run_names: list[str], paths: ResultsPaths) -> dict[str, dict[str, str]]:
-    """Return {run_name: {prompt: continuation}} and write it to results/generations.json."""
+def generate_for_runs(run_names: list[str], paths: ResultsPaths) -> dict[str, dict[str, object]]:
+    """Return and write to results/generations.json:
+
+        {run_name: {"fingerprint": <run's identity fingerprint>, "samples": {prompt: text}}}
+
+    The fingerprint is what `load_run` verified when the checkpoint was loaded, recorded
+    alongside the samples so a later reader (report.py) can tell a retrained run under the
+    same name from the one these samples actually came from, instead of trusting the run
+    name alone.
+    """
     require_unique("run_names", run_names)
     device = select_device()
-    samples: dict[str, dict[str, str]] = {}
+    generations: dict[str, dict[str, object]] = {}
     for run_name in run_names:
-        model = load_model(run_name, paths, device)
+        result = load_run(run_name, paths)
+        model = load_model_from_result(result, paths, device)
         torch.manual_seed(GENERATION_SEED)
-        samples[run_name] = {
+        prompts = {
             prompt: generate_continuation(model, prompt, device) for prompt in GENERATION_PROMPTS
         }
+        generations[run_name] = {FINGERPRINT_KEY: result.identity.fingerprint, SAMPLES_KEY: prompts}
         logger.info("sampled %d prompts from %s", len(GENERATION_PROMPTS), run_name)
-    paths.generations.write_text(json.dumps(samples, indent=2, ensure_ascii=False))
-    return samples
+    paths.generations.write_text(json.dumps(generations, indent=2, ensure_ascii=False))
+    return generations
 
 
 def parse_args() -> argparse.Namespace:

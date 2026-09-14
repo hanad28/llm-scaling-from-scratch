@@ -137,12 +137,14 @@ class ModelSize:
 
 # Head dimension is fixed at 64 and the MLP ratio at 4, so width and depth are
 # the only things that change. d_model / n_layer stays in the 32 to 64 band.
+# Roughly log-spaced from 0.8M to 99M non-embedding parameters, in ascending order.
 MODEL_SIZES: tuple[ModelSize, ...] = (
     ModelSize(name="tiny", n_layer=4, d_model=128),
     ModelSize(name="small", n_layer=6, d_model=256),
     ModelSize(name="medium", n_layer=7, d_model=384),
     ModelSize(name="large", n_layer=8, d_model=512),
-    ModelSize(name="xlarge", n_layer=14, d_model=768),
+    ModelSize(name="xlarge", n_layer=10, d_model=640),
+    ModelSize(name="xxlarge", n_layer=14, d_model=768),
 )
 MODEL_SIZES_BY_NAME = {size.name: size for size in MODEL_SIZES}
 
@@ -163,6 +165,19 @@ KAPLAN_LR_SLOPE = -0.0001395
 # Cosine decay finishes at this fraction of the peak learning rate.
 FINAL_LR_FRACTION = 0.1
 WARMUP_FRACTION = 0.05
+
+# One pass over the corpus gives every size the same tokens, so tokens per non-embedding
+# parameter falls as the model grows. MIN_TOKENS_PER_PARAMETER is a soft floor for catching
+# severe under-training, not a strict cutoff: a size whose one pass lands more than
+# REPETITION_TOLERANCE (a fraction of the floor) below it repeats the corpus (budget.py)
+# until it reaches the floor, up to MAX_EPOCHS passes. A size a little under the floor is
+# left at one pass, since doubling its data would over-correct a borderline case.
+# Muennighoff et al. (2023) find up to four passes over the same data cost little against
+# the same number of fresh tokens. The largest size stays below the floor even at the cap;
+# see README.
+MIN_TOKENS_PER_PARAMETER = 5.0
+REPETITION_TOLERANCE = 0.1
+MAX_EPOCHS = 4
 
 
 # Marks the TrainingConfig fields a command line may set per invocation. When a saved
@@ -244,12 +259,18 @@ GENERATION_PROMPTS: tuple[str, ...] = (
 
 @dataclass
 class RunConfig:
-    """Everything needed to reproduce a single training run."""
+    """Everything needed to reproduce a single training run.
+
+    `epochs` is the number of shuffled passes over the training split. It sits here rather
+    than in TrainingConfig because it is set per size by the sweep (see budget.py), whereas
+    TrainingConfig is shared by every run.
+    """
 
     model_size: str
     positional_scheme: str = DEFAULT_POSITIONAL_SCHEME
     seed: int = 0
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    epochs: int = 1
 
     def __post_init__(self) -> None:
         if self.model_size not in MODEL_SIZES_BY_NAME:
@@ -263,6 +284,7 @@ class RunConfig:
                 f"{list(POSITIONAL_SCHEMES)}"
             )
         require_non_negative("seed", self.seed)
+        require_positive("epochs", self.epochs)
 
     @property
     def run_name(self) -> str:

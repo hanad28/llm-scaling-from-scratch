@@ -13,10 +13,12 @@ from scaling_lm.model import GPTConfig
 from scaling_lm.report import build_report
 from scaling_lm.runs import (
     RESULT_FILENAME,
+    PartialRunReuseError,
     RunResult,
     StaleRunError,
     hash_specification,
     load_run,
+    planned_epochs_of,
     run_identity,
 )
 from scaling_lm.sweep import write_sweep_manifest
@@ -40,6 +42,7 @@ def make_result(run_config: RunConfig, validation_loss: float = 3.0) -> RunResul
         seed=run_config.seed,
         parameters={"total": 1, "embedding": 1, "non_embedding": 1},
         identity=run_identity(run_config),
+        epochs_completed=float(run_config.epochs),
         total_steps=1,
         tokens_seen=1,
         peak_learning_rate=1e-3,
@@ -83,6 +86,20 @@ def test_fingerprint_covers_corpus_architecture_and_schedule():
         RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4, warmup_fraction=0.5)),
     ]
     assert all(run_identity(variant).fingerprint != baseline for variant in variants)
+
+
+def test_fingerprint_distinguishes_epoch_counts_at_the_same_size():
+    training = TrainingConfig(max_steps=4)
+    one_epoch = run_identity(RunConfig("tiny", "learned", 0, training, epochs=1))
+    assert one_epoch.specification["schedule"]["epochs"] == 1
+    repeated = {
+        epochs: run_identity(RunConfig("tiny", "learned", 0, training, epochs=epochs))
+        for epochs in (2, 3, 4)
+    }
+    for epochs, identity in repeated.items():
+        assert identity.specification["schedule"]["epochs"] == epochs
+        assert identity.fingerprint != one_epoch.fingerprint
+    assert len({identity.fingerprint for identity in repeated.values()}) == len(repeated)
 
 
 def pretend_to_be_an_a40(monkeypatch) -> None:
@@ -144,6 +161,68 @@ def test_train_or_load_rejects_different_training_config(saved_run):
         train_or_load(changed, paths)
 
 
+def test_train_or_load_rejects_different_epoch_count(saved_run):
+    run_config, paths = saved_run
+    assert run_config.epochs == 1
+    repeated = RunConfig("tiny", "learned", 0, run_config.training, epochs=2)
+    assert repeated.run_name == run_config.run_name
+    with pytest.raises(StaleRunError, match="changed: \\['schedule'\\]"):
+        train_or_load(repeated, paths)
+
+
+def test_load_run_restores_the_recorded_epoch_count(tmp_path):
+    paths = ResultsPaths(tmp_path)
+    repeated = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4), epochs=3)
+    write_result(make_result(repeated), paths)
+    loaded = load_run(repeated.run_name, paths)
+    assert planned_epochs_of(loaded) == 3
+    assert loaded.epochs_completed == 3.0
+    assert loaded.identity == run_identity(repeated)
+    assert loaded.identity != run_identity(RunConfig("tiny", "learned", 0, repeated.training))
+
+
+def test_load_run_rejects_a_record_without_an_epoch_count(tmp_path):
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4))
+    write_result(make_result(run_config), paths)
+    result_file = paths.run_directory(run_config.run_name) / RESULT_FILENAME
+    payload = json.loads(result_file.read_text())
+    del payload["identity"]["specification"]["schedule"]["epochs"]
+    # Rehash so the edited-file guard does not fire first; the missing key is what is tested.
+    payload["identity"]["fingerprint"] = hash_specification(payload["identity"]["specification"])
+    result_file.write_text(json.dumps(payload))
+    with pytest.raises(StaleRunError, match="lacks \\['epochs'\\]"):
+        load_run(run_config.run_name, paths)
+
+
+def write_pre_epoch_result(run_config: RunConfig, paths: ResultsPaths) -> None:
+    """A result.json as PR1 wrote it: no epoch count anywhere, fingerprint consistent."""
+    payload = asdict(make_result(run_config))
+    del payload["epochs_completed"]
+    del payload["identity"]["specification"]["schedule"]["epochs"]
+    payload["identity"]["fingerprint"] = hash_specification(payload["identity"]["specification"])
+    run_dir = paths.run_directory(run_config.run_name)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / RESULT_FILENAME).write_text(json.dumps(payload))
+
+
+def test_pre_epoch_result_is_stale_for_the_loader_not_a_type_error(tmp_path):
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4))
+    write_pre_epoch_result(run_config, paths)
+    with pytest.raises(StaleRunError, match="epochs_completed.*Delete the run directory"):
+        load_run(run_config.run_name, paths)
+
+
+def test_pre_epoch_result_is_stale_for_a_new_request_not_a_type_error(tmp_path, monkeypatch):
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4))
+    write_pre_epoch_result(run_config, paths)
+    monkeypatch.setattr(train_module, "train_run", lambda *_args: pytest.fail("trained"))
+    with pytest.raises(StaleRunError, match="epochs_completed.*Delete the run directory"):
+        train_or_load(run_config, paths)
+
+
 def test_train_or_load_rejects_rebuilt_corpus(saved_run, monkeypatch):
     run_config, paths = saved_run
     monkeypatch.setattr(runs_module, "corpus_fingerprint", lambda: REBUILT_CORPUS_FINGERPRINT)
@@ -182,6 +261,55 @@ def test_load_run_rejects_edited_result_file(saved_run):
     result_file.write_text(json.dumps(payload))
     with pytest.raises(StaleRunError, match="edited after training"):
         load_run(run_config.run_name, paths)
+
+
+def make_partial_result(run_config: RunConfig, completed_epochs: float) -> RunResult:
+    """A saved result whose identity matches `run_config` exactly but which stopped early."""
+    result = make_result(run_config)
+    result.epochs_completed = completed_epochs
+    return result
+
+
+def test_train_or_load_rejects_a_partial_result_for_a_full_request(tmp_path, monkeypatch):
+    paths = ResultsPaths(tmp_path)
+    # No max_steps: this run_config asks for a full, uncapped run.
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(), epochs=3)
+    write_result(make_partial_result(run_config, completed_epochs=1.0), paths)
+
+    def refuse_to_train(*_args: object) -> RunResult:
+        raise AssertionError("train_run should not be called when a matching result exists")
+
+    monkeypatch.setattr(train_module, "train_run", refuse_to_train)
+    with pytest.raises(PartialRunReuseError, match="partial result.*1 of 3.*--allow-partial"):
+        train_or_load(run_config, paths)
+
+
+def test_train_or_load_reuses_a_partial_result_with_allow_partial(tmp_path, monkeypatch):
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(), epochs=3)
+    write_result(make_partial_result(run_config, completed_epochs=1.0), paths)
+    monkeypatch.setattr(train_module, "train_run", lambda *_args: pytest.fail("should not retrain"))
+    reused = train_or_load(run_config, paths, allow_partial=True)
+    assert reused.epochs_completed == 1.0
+
+
+def test_train_or_load_accepts_a_partial_result_when_the_request_is_itself_capped(
+    tmp_path, monkeypatch
+):
+    """A request that itself sets max_steps is not asking for a full run, so no override."""
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(max_steps=4), epochs=3)
+    write_result(make_partial_result(run_config, completed_epochs=1.0), paths)
+    monkeypatch.setattr(train_module, "train_run", lambda *_args: pytest.fail("should not retrain"))
+    assert train_or_load(run_config, paths).epochs_completed == 1.0
+
+
+def test_train_or_load_accepts_a_result_that_finished_its_plan(tmp_path, monkeypatch):
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", "learned", 0, TrainingConfig(), epochs=3)
+    write_result(make_partial_result(run_config, completed_epochs=3.0), paths)
+    monkeypatch.setattr(train_module, "train_run", lambda *_args: pytest.fail("should not retrain"))
+    assert train_or_load(run_config, paths).epochs_completed == 3.0
 
 
 def test_report_loads_runs_through_the_shared_check(tmp_path, monkeypatch):

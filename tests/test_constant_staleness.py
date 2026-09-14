@@ -29,7 +29,7 @@ PACKAGE_DIR = Path(scaling_lm.__file__).parent
 STUB_CORPUS_FINGERPRINT = "c" * 64
 # Modules whose code runs during training. Any tunable they read must be a field of
 # GPTConfig or TrainingConfig so that it is part of the fingerprinted specification.
-TRAINING_PATH_MODULES = ("dataset.py", "model.py", "positional.py", "train.py")
+TRAINING_PATH_MODULES = ("budget.py", "dataset.py", "model.py", "positional.py", "train.py")
 
 CHILD_SCRIPT = """
 import json
@@ -46,7 +46,7 @@ if {action!r} == "save":
         run_name=run_config.run_name, model_size="tiny", positional_scheme="rope", seed=0,
         parameters={{"total": 1, "embedding": 1, "non_embedding": 1}},
         identity=runs.run_identity(run_config),
-        total_steps=1, tokens_seen=1, peak_learning_rate=1e-3,
+        epochs_completed=1.0, total_steps=1, tokens_seen=1, peak_learning_rate=1e-3,
         final_validation_loss=3.0, final_test_loss=3.0, wall_time_seconds=1.0, device="cpu",
     )
     run_dir = paths.run_directory(run_config.run_name)
@@ -163,11 +163,11 @@ def test_training_path_modules_keep_no_literal_constants(module):
 
 def test_specification_is_exactly_the_resolved_configs(monkeypatch):
     monkeypatch.setattr(runs_module, "corpus_fingerprint", lambda: STUB_CORPUS_FINGERPRINT)
-    run_config = RunConfig("small", "learned", 3, TrainingConfig(max_steps=2))
+    run_config = RunConfig("small", "learned", 3, TrainingConfig(max_steps=2), epochs=2)
     specification = runs_module.run_identity(run_config).specification
     model = GPTConfig.from_model_size(MODEL_SIZES_BY_NAME["small"], "learned")
     assert specification["architecture"] == asdict(model)
-    assert specification["schedule"] == {**asdict(run_config.training), "seed": 3}
+    assert specification["schedule"] == {**asdict(run_config.training), "seed": 3, "epochs": 2}
     assert set(specification) == {"corpus", "architecture", "schedule", "environment"}
 
 

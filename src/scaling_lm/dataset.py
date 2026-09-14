@@ -1,12 +1,17 @@
 """Batching over the flat token files produced by scaling_lm.tokenizer.
 
 The training split is cut into non-overlapping windows of CONTEXT_LENGTH tokens.
-One epoch visits every window exactly once in a seeded random order, so every
-model in the sweep sees the same tokens and the same number of steps.
+One epoch visits every window at most once in a seeded random order; a run of several
+epochs repeats the split with a fresh shuffle each time, so every model in the sweep
+sees the same windows and two runs with the same seed see them in the same order. The
+windows at the end of a pass that do not fill a whole optimiser step are dropped, and
+logged, rather than carried into the next pass, mirroring how evaluation keeps its final
+partial batch separate.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 
 import numpy as np
@@ -16,6 +21,8 @@ from torch import Tensor
 from scaling_lm.config import CONTEXT_LENGTH
 from scaling_lm.tokenizer import load_tokens
 from scaling_lm.validation import require_non_negative, require_positive
+
+logger = logging.getLogger(__name__)
 
 
 class TokenWindows:
@@ -42,20 +49,40 @@ class TokenWindows:
         return inputs, targets
 
 
-def epoch_batches(windows: TokenWindows, batch_size: int, seed: int) -> Iterator[np.ndarray]:
-    """Yield window-index arrays covering one shuffled pass, dropping the final partial batch."""
+def epoch_batches(
+    windows: TokenWindows,
+    batch_size: int,
+    seed: int,
+    epochs: int = 1,
+    micro_batches_per_step: int = 1,
+) -> Iterator[np.ndarray]:
+    """Yield micro-batch window indices for `epochs` shuffled passes, whole steps only.
+
+    Each pass yields `micro_batches_per_step` arrays of `batch_size` indices per optimiser
+    step, for as many steps as the split fills. Windows left over at the end of a pass are
+    dropped and logged, so consecutive steps never mix two passes. One generator is seeded
+    once and draws one permutation per pass, so the first pass of a multi-epoch run is
+    identical to a single-epoch run with the same seed.
+    """
     require_positive("batch_size", batch_size)
     require_non_negative("seed", seed)
+    require_positive("epochs", epochs)
+    require_positive("micro_batches_per_step", micro_batches_per_step)
+    windows_per_step = batch_size * micro_batches_per_step
+    steps_per_pass = len(windows) // windows_per_step
+    windows_per_pass = steps_per_pass * windows_per_step
+    logger.info(
+        "each pass: %d optimiser steps of %d windows; %d of %d windows dropped (incomplete step)",
+        steps_per_pass,
+        windows_per_step,
+        len(windows) - windows_per_pass,
+        len(windows),
+    )
     generator = np.random.default_rng(seed)
-    permutation = generator.permutation(len(windows))
-    full_batches = len(windows) // batch_size
-    for batch_index in range(full_batches):
-        yield permutation[batch_index * batch_size : (batch_index + 1) * batch_size]
-
-
-def steps_per_epoch(windows: TokenWindows, batch_size: int) -> int:
-    require_positive("batch_size", batch_size)
-    return len(windows) // batch_size
+    for _ in range(epochs):
+        permutation = generator.permutation(len(windows))
+        for start in range(0, windows_per_pass, batch_size):
+            yield permutation[start : start + batch_size]
 
 
 def sequential_batches(windows: TokenWindows, batch_size: int) -> Iterator[np.ndarray]:

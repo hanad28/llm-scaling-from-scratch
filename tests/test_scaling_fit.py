@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from scaling_lm.scaling_fit import fit_power_law
+from scaling_lm.scaling_fit import alpha_std_from_loss_noise, fit_power_law
 
 PARAMETER_COUNTS = np.array([1e6, 5e6, 1.2e7, 2.5e7, 1e8])
 
@@ -68,6 +68,47 @@ def test_rejects_confidence_level_outside_unit_interval(confidence_level):
     losses = 10.0 * PARAMETER_COUNTS**-0.08
     with pytest.raises(ValueError, match="confidence_level"):
         fit_power_law(PARAMETER_COUNTS, losses, confidence_level=confidence_level)
+
+
+def test_alpha_std_from_loss_noise_matches_monte_carlo():
+    """The closed form agrees with refitting under independent Gaussian loss noise."""
+    losses = 10.0 * PARAMETER_COUNTS**-0.076
+    loss_std = 0.01
+    predicted = alpha_std_from_loss_noise(PARAMETER_COUNTS, losses, loss_std)
+    generator = np.random.default_rng(0)
+    alphas = []
+    for _ in range(4000):
+        noisy = losses + generator.normal(0, loss_std, len(losses))
+        slope, _ = np.polyfit(np.log(PARAMETER_COUNTS), np.log(noisy), deg=1)
+        alphas.append(-slope)
+    assert predicted == pytest.approx(np.std(alphas, ddof=1), rel=0.1)
+
+
+def test_alpha_std_from_loss_noise_scales_with_the_noise_and_is_zero_without_it():
+    losses = 10.0 * PARAMETER_COUNTS**-0.076
+    assert alpha_std_from_loss_noise(PARAMETER_COUNTS, losses, 0.0) == 0.0
+    single = alpha_std_from_loss_noise(PARAMETER_COUNTS, losses, 0.01)
+    assert alpha_std_from_loss_noise(PARAMETER_COUNTS, losses, 0.02) == pytest.approx(2 * single)
+
+
+def test_alpha_std_from_loss_noise_is_separate_from_the_regression_error():
+    """An exact power law has zero regression error but non-zero propagated seed noise."""
+    losses = 10.0 * PARAMETER_COUNTS**-0.076
+    fit = fit_power_law(PARAMETER_COUNTS, losses, bootstrap_resamples=100)
+    assert fit.alpha_standard_error == pytest.approx(0.0, abs=1e-9)
+    assert alpha_std_from_loss_noise(PARAMETER_COUNTS, losses, 0.01) > 0
+
+
+def test_alpha_std_from_loss_noise_validates_inputs():
+    losses = 10.0 * PARAMETER_COUNTS**-0.076
+    with pytest.raises(ValueError, match="loss_noise_std"):
+        alpha_std_from_loss_noise(PARAMETER_COUNTS, losses, -0.01)
+    with pytest.raises(ValueError, match="at least 3"):
+        alpha_std_from_loss_noise(PARAMETER_COUNTS[:2], losses[:2], 0.01)
+    with pytest.raises(ValueError, match="same length"):
+        alpha_std_from_loss_noise(PARAMETER_COUNTS, losses[:-1], 0.01)
+    with pytest.raises(ValueError, match="positive"):
+        alpha_std_from_loss_noise(PARAMETER_COUNTS, -losses, 0.01)
 
 
 def test_to_dict_is_json_friendly():

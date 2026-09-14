@@ -2,7 +2,9 @@
 
     python -m scaling_lm.ablation [--seeds 0 1 2] [--results-dir PATH]
 
-The learned-embedding seed-0 run is shared with the sweep, so it is reused when present.
+Every run gets the epoch count `budget.token_budget` assigns the ablation size, the same
+rule the sweep applies, so the learned-embedding seed-0 run is shared with the sweep and
+is reused when present.
 
 positional_ablation.json is a manifest (model size, seeds, run names per scheme). The
 statistics are computed from the verified result.json of each run by `analyse_ablation`,
@@ -20,6 +22,7 @@ from dataclasses import asdict, dataclass
 import numpy as np
 from scipy import stats
 
+from scaling_lm.budget import token_budget
 from scaling_lm.config import (
     ABLATION_MODEL_SIZE,
     ABLATION_POSITIONAL_SCHEMES,
@@ -29,6 +32,7 @@ from scaling_lm.config import (
     RunConfig,
     TrainingConfig,
 )
+from scaling_lm.dataset import TokenWindows
 from scaling_lm.runs import RunResult
 from scaling_lm.train import add_training_arguments, train_or_load, training_config_from_args
 from scaling_lm.validation import non_negative_int, require_unique
@@ -154,9 +158,11 @@ def run_ablation(
     training: TrainingConfig,
     paths: ResultsPaths,
     model_size: str = ABLATION_MODEL_SIZE,
+    allow_partial: bool = False,
 ) -> AblationAnalysis:
     """Train every (scheme, seed) pair, write the manifest and return the analysis."""
     require_unique("seeds", list(seeds))
+    epochs = token_budget(model_size, len(TokenWindows("train")), training).epochs
     per_scheme: dict[str, list[RunResult]] = {}
     for scheme in ABLATION_POSITIONAL_SCHEMES:
         for seed in seeds:
@@ -165,8 +171,11 @@ def run_ablation(
                 positional_scheme=scheme,
                 seed=seed,
                 training=training,
+                epochs=epochs,
             )
-            per_scheme.setdefault(scheme, []).append(train_or_load(run_config, paths))
+            per_scheme.setdefault(scheme, []).append(
+                train_or_load(run_config, paths, allow_partial)
+            )
 
     manifest = AblationManifest(
         model_size=model_size,
@@ -203,6 +212,7 @@ def main() -> None:
         training_config_from_args(args),
         ResultsPaths(args.results_dir),
         model_size=args.model_size,
+        allow_partial=args.allow_partial,
     )
 
 

@@ -2,10 +2,10 @@
 
 `run_identity` is the only function that says what a run is: a specification covering
 everything that determines its result (the corpus token files, the resolved GPTConfig,
-the resolved TrainingConfig plus seed, the torch version and the device) and the SHA-256
-of that whole specification. The environment section is deliberately narrow: it separates
-a CPU smoke run from an A40 run of the same name and a torch upgrade from the run before
-it, not every package or OS difference (see README, Limitations).
+the resolved TrainingConfig plus seed and epoch count, the torch version and the device)
+and the SHA-256 of that whole specification. The environment section is deliberately
+narrow: it separates a CPU smoke run from an A40 run of the same name and a torch upgrade
+from the run before it, not every package or OS difference (see README, Limitations).
 Training records its output verbatim in result.json; `verify_result` recomputes it and
 compares. There is no list of constants to maintain: the model and training code read
 every tunable from the two config objects (tests/test_constant_staleness.py enforces
@@ -15,6 +15,11 @@ module assembles or hashes a specification (tests/test_single_source.py enforces
 Every reader of a result.json goes through `verify_result`, via either `resolve_run`
 (a requested RunConfig, used before training) or `load_run` (a run name, used by report
 and generate). Losses are read from the RunResult those return and from nowhere else.
+
+`resolve_run` answers "is this exactly the run asked for?"; it says nothing about
+whether that run finished. `reject_partial_reuse` is the second, independent check
+`train_or_load` layers on top: a full (uncapped) request never gets back a partial
+result silently, only with an explicit `--allow-partial`.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ import json
 import logging
 import os
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import MISSING, asdict, dataclass, field, fields
 from pathlib import Path
 
 import torch
@@ -39,6 +44,7 @@ CHECKPOINT_FILENAME = "model.pt"
 RESULT_FILENAME = "result.json"
 PARTIAL_WRITE_SUFFIX = ".partial"
 FINGERPRINT_PREVIEW_CHARS = 12
+EPOCHS_KEY = "epochs"
 
 
 @dataclass
@@ -65,6 +71,12 @@ class RunResult:
     `identity` is `run_identity(run_config)` as computed when training started; it is the
     only record of what was trained. `final_validation_loss` and `final_test_loss` here
     are the only place a loss is read from.
+
+    `epochs_completed` is the number of passes over the training split the run actually
+    made, `total_steps / steps_per_epoch`. It equals the requested count (kept in the
+    identity's schedule, see `planned_epochs_of`) unless `max_steps` stopped the run
+    early, in which case it is the fraction reached, so a capped run never reads as a
+    finished one.
     """
 
     run_name: str
@@ -73,6 +85,7 @@ class RunResult:
     seed: int
     parameters: dict[str, int]
     identity: RunIdentity
+    epochs_completed: float
     total_steps: int
     tokens_seen: int
     peak_learning_rate: float
@@ -85,6 +98,10 @@ class RunResult:
 
 class StaleRunError(RuntimeError):
     """A result.json exists for the run name but was produced by a different run."""
+
+
+class PartialRunReuseError(RuntimeError):
+    """A saved result is a partial run (max_steps cut it short) but a full run was asked for."""
 
 
 def hash_specification(specification: dict[str, object]) -> str:
@@ -112,14 +129,20 @@ def run_identity(run_config: RunConfig) -> RunIdentity:
 
     The corpus enters as `corpus_fingerprint()`, a hash of the token files kept in
     tokenizer.py because it describes the data, not a run; it is an input here, not a
-    second identity. Architecture and schedule are `asdict()` of the resolved configs.
+    second identity. Architecture and schedule are `asdict()` of the resolved configs; the
+    schedule also carries the two per-run settings RunConfig holds outside TrainingConfig,
+    the seed and the epoch count.
     """
     size = MODEL_SIZES_BY_NAME[run_config.model_size]
     model = GPTConfig.from_model_size(size, run_config.positional_scheme)
     specification: dict[str, object] = {
         "corpus": corpus_fingerprint(),
         "architecture": asdict(model),
-        "schedule": {**asdict(run_config.training), "seed": run_config.seed},
+        "schedule": {
+            **asdict(run_config.training),
+            "seed": run_config.seed,
+            "epochs": run_config.epochs,
+        },
         "environment": environment_specification(),
     }
     return RunIdentity(specification, hash_specification(specification))
@@ -128,15 +151,16 @@ def run_identity(run_config: RunConfig) -> RunIdentity:
 def run_config_of(result: RunResult) -> RunConfig:
     """Rebuild the request a saved result answers: its name plus the options its CLI was given.
 
-    Only the CLI options are taken from the saved record. Every other TrainingConfig
-    field comes from the current code, so checking the rebuilt request against the record
-    catches a changed constant just as `resolve_run` does for a fresh request.
+    Only the CLI options and the per-run epoch count are taken from the saved record. Every
+    other TrainingConfig field comes from the current code, so checking the rebuilt request
+    against the record catches a changed constant just as `resolve_run` does for a fresh
+    request.
     """
     schedule = result.identity.specification["schedule"]
     if not isinstance(schedule, dict):
         raise StaleRunError(f"{result.run_name}: result.json has no schedule section")
     option_names = TrainingConfig.cli_option_names()
-    missing = sorted(option_names - schedule.keys())
+    missing = sorted((option_names | {EPOCHS_KEY}) - schedule.keys())
     if missing:
         raise StaleRunError(f"{result.run_name}: result.json schedule lacks {missing}")
     training = {name: schedule[name] for name in option_names}
@@ -145,7 +169,36 @@ def run_config_of(result: RunResult) -> RunConfig:
         positional_scheme=result.positional_scheme,
         seed=result.seed,
         training=TrainingConfig(**training),
+        epochs=schedule[EPOCHS_KEY],
     )
+
+
+def planned_epochs_of(result: RunResult) -> int:
+    """The epoch count the run was asked for, read from the identity it was trained under."""
+    return run_config_of(result).epochs
+
+
+def stopped_early(result: RunResult) -> bool:
+    return result.epochs_completed < planned_epochs_of(result)
+
+
+def format_epochs(epochs: float) -> str:
+    """`3` for a whole number of passes, otherwise three significant figures (`0.5`, `3.45e-05`)."""
+    return f"{epochs:.3g}"
+
+
+def epochs_summary(result: RunResult) -> str:
+    """`3`, or `0.5 of 3` when max_steps stopped the run before its planned passes."""
+    planned = planned_epochs_of(result)
+    if stopped_early(result):
+        return f"{format_epochs(result.epochs_completed)} of {planned}"
+    return str(planned)
+
+
+def describe_passes(result: RunResult) -> str:
+    """`epochs_summary` with its noun: `1 pass`, `3 passes`, `0.5 of 3 passes`."""
+    noun = "pass" if planned_epochs_of(result) == 1 else "passes"
+    return f"{epochs_summary(result)} {noun}"
 
 
 def result_path(run_name: str, paths: ResultsPaths) -> str:
@@ -168,9 +221,28 @@ def write_atomically(final_path: Path, write: Callable[[Path], None]) -> None:
         raise
 
 
+def required_result_fields() -> set[str]:
+    return {
+        result_field.name
+        for result_field in fields(RunResult)
+        if result_field.default is MISSING and result_field.default_factory is MISSING
+    }
+
+
 def read_result(run_name: str, paths: ResultsPaths) -> RunResult:
-    """Parse a result.json without checking it. Only `verify_result` callers should use this."""
+    """Parse a result.json without checking it. Only `verify_result` callers should use this.
+
+    A record written by an older version of the code, which did not know about a field the
+    current RunResult requires, is stale rather than malformed: it is reported like any
+    other stale run instead of failing inside the dataclass constructor.
+    """
     payload = json.loads((paths.run_directory(run_name) / RESULT_FILENAME).read_text())
+    missing = sorted(required_result_fields() - payload.keys())
+    if missing:
+        raise StaleRunError(
+            f"{result_path(run_name, paths)} was written by an older version of the code and "
+            f"lacks {missing}. Delete the run directory or use another --results-dir"
+        )
     payload["history"] = [EvalPoint(**point) for point in payload["history"]]
     payload["identity"] = RunIdentity(**payload["identity"])
     return RunResult(**payload)
@@ -225,3 +297,35 @@ def load_run(run_name: str, paths: ResultsPaths) -> RunResult:
     """Load a finished run by name, checking it against the current code and corpus."""
     result = read_result(run_name, paths)
     return verify_result(result, run_config_of(result), paths)
+
+
+def reject_partial_reuse(
+    result: RunResult, run_config: RunConfig, paths: ResultsPaths, allow_partial: bool
+) -> None:
+    """Refuse a partial `result` when `run_config` asks for a full (uncapped) run.
+
+    `resolve_run` already checked that `result` is an exact fingerprint match for
+    `run_config`; that identity check does not by itself say whether the saved run
+    actually finished its planned passes, only that nothing about the request has
+    changed. `max_steps` is itself part of the schedule `run_identity` hashes (it is a
+    normal `TrainingConfig` field), so under the current identity a genuinely
+    interrupted `train_run` cannot produce this state: `write_atomically` never leaves a
+    self-consistent but partial result.json behind, and a capped request's schedule
+    fingerprint differs from an uncapped one's, so `resolve_run` would reject a mismatch
+    on its own before this function is reached. This check exists for what identity
+    alone does not rule out: a result.json placed under this run name by another means
+    (copied from a different results directory, hand-edited, or a future change to what
+    `run_identity` covers), so a partial result is never handed back as if it were the
+    finished run a full request asked for merely because its fingerprint happens to
+    match. A request that itself caps `max_steps` is not asking for a full run, so it is
+    exempt: reusing a matching capped result under the same cap is the intended
+    resumption path for a capped sweep or ablation.
+    """
+    if run_config.training.max_steps is not None or allow_partial:
+        return
+    if stopped_early(result):
+        raise PartialRunReuseError(
+            f"{result_path(run_config.run_name, paths)} is a partial result "
+            f"({epochs_summary(result)}), but a full run was requested. Pass --allow-partial "
+            "to reuse it anyway, or delete the run directory to retrain."
+        )

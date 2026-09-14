@@ -1,8 +1,10 @@
-"""Train every model size on the same training tokens and collect the final losses.
+"""Train every model size on the same training split and collect the final losses.
 
     python -m scaling_lm.sweep [--sizes tiny small ...] [--results-dir PATH]
 
-Finished runs (those with a result.json) are skipped, so the sweep can be resumed; see
+Each size gets the number of passes over the split that `budget.token_budget` assigns it,
+so the smaller sizes see the corpus once and the larger ones repeat it. Finished runs
+(those with a result.json) are skipped, so the sweep can be resumed; see
 `runs.resolve_run` for the fingerprint check that guards the reuse.
 
 scaling_sweep.json is a manifest: the run names in sweep order and nothing else. Losses
@@ -17,6 +19,7 @@ import json
 import logging
 from collections.abc import Sequence
 
+from scaling_lm.budget import token_budget
 from scaling_lm.config import (
     DEFAULT_POSITIONAL_SCHEME,
     MODEL_SIZES,
@@ -25,6 +28,7 @@ from scaling_lm.config import (
     RunConfig,
     TrainingConfig,
 )
+from scaling_lm.dataset import TokenWindows
 from scaling_lm.runs import RunResult
 from scaling_lm.train import add_training_arguments, train_or_load, training_config_from_args
 from scaling_lm.validation import require_unique
@@ -53,20 +57,34 @@ def read_sweep_manifest(paths: ResultsPaths) -> list[str]:
     return [str(run_name) for run_name in run_names]
 
 
+def sweep_run_config(
+    size_name: str, training: TrainingConfig, train_window_count: int
+) -> RunConfig:
+    """The run the sweep trains for one size: default scheme, the sweep seed, planned epochs."""
+    budget = token_budget(size_name, train_window_count, training)
+    return RunConfig(
+        model_size=size_name,
+        positional_scheme=DEFAULT_POSITIONAL_SCHEME,
+        seed=SWEEP_SEED,
+        training=training,
+        epochs=budget.epochs,
+    )
+
+
 def run_sweep(
-    size_names: Sequence[str], training: TrainingConfig, paths: ResultsPaths
+    size_names: Sequence[str],
+    training: TrainingConfig,
+    paths: ResultsPaths,
+    allow_partial: bool = False,
 ) -> list[RunResult]:
     """Train the requested sizes in order and write results/scaling_sweep.json."""
     require_unique("sizes", list(size_names))
+    train_window_count = len(TokenWindows("train"))
     results = []
     for size_name in size_names:
-        run_config = RunConfig(
-            model_size=size_name,
-            positional_scheme=DEFAULT_POSITIONAL_SCHEME,
-            seed=SWEEP_SEED,
-            training=training,
-        )
-        results.append(train_or_load(run_config, paths))
+        run_config = sweep_run_config(size_name, training, train_window_count)
+        logger.info("%s: %d epoch(s) planned", run_config.run_name, run_config.epochs)
+        results.append(train_or_load(run_config, paths, allow_partial))
     write_sweep_manifest(results, paths)
     return results
 
@@ -86,7 +104,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args()
-    run_sweep(args.sizes, training_config_from_args(args), ResultsPaths(args.results_dir))
+    run_sweep(
+        args.sizes,
+        training_config_from_args(args),
+        ResultsPaths(args.results_dir),
+        allow_partial=args.allow_partial,
+    )
 
 
 if __name__ == "__main__":
