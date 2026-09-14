@@ -27,7 +27,7 @@ from scaling_lm.report import (
     sweep_section,
     verified_generations,
 )
-from scaling_lm.runs import RunResult
+from scaling_lm.runs import RESULT_FILENAME, RunResult
 from scaling_lm.scaling_fit import alpha_std_from_loss_noise, fit_power_law
 
 PARAMETER_COUNTS = [793_344, 4_739_072, 12_422_016, 25_220_096, 49_236_480, 99_231_744]
@@ -234,6 +234,39 @@ def test_verified_generations_drops_samples_for_a_run_that_no_longer_verifies(tm
     generations = {run_config.run_name: {"fingerprint": "stale", "samples": {"p": "old"}}}
     # No result.json on disk at all: load_run fails, not just a fingerprint mismatch.
     assert verified_generations(generations, paths) == {}
+
+
+def test_verified_generations_drops_samples_for_a_run_with_an_unparseable_result(tmp_path):
+    """Fail-then-pass proof: one corrupted result.json referenced from generations.json
+
+    must not take the whole report down. Before this fix, `verified_generations` only
+    caught `StaleRunError` and `FileNotFoundError`; a genuinely malformed record (never
+    valid JSON, or missing/mistyped pieces `read_result` indexes before validating)
+    raised `json.JSONDecodeError`, `KeyError` or `TypeError` straight out of this
+    function instead of being dropped like any other unverifiable entry.
+    """
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", DEFAULT_POSITIONAL_SCHEME, 0, TrainingConfig(max_steps=4))
+    run_dir = paths.run_directory(run_config.run_name)
+    run_dir.mkdir(parents=True)
+    (run_dir / RESULT_FILENAME).write_text("{not valid json")
+    generations = {run_config.run_name: {"fingerprint": "whatever", "samples": {"p": "old"}}}
+    assert verified_generations(generations, paths) == {}
+
+
+def test_verified_generations_tolerates_a_matching_entry_with_no_samples_key(tmp_path):
+    """Fail-then-pass proof: a hand-edited entry with the right fingerprint but no
+
+    "samples" key (not something `generate.py` itself would ever write) must not crash
+    the report either. Before this fix, `entry["samples"]` was indexed unconditionally
+    once the fingerprint matched, raising `KeyError` for this entry.
+    """
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", DEFAULT_POSITIONAL_SCHEME, 0, TrainingConfig(max_steps=4))
+    result = make_result(run_config)
+    write_result(result, paths)
+    generations = {run_config.run_name: {"fingerprint": result.identity.fingerprint}}
+    assert verified_generations(generations, paths) == {run_config.run_name: {}}
 
 
 def test_verified_generations_handles_no_generations_file():

@@ -307,6 +307,17 @@ def verified_generations(
     they came from the current checkpoint. This is the same class of stale-reuse bug
     `verify_result` guards against for losses, applied to samples: go through `load_run`
     rather than trusting the run name in generations.json on its own.
+
+    `load_run` fails several ways for a run name in generations.json that no longer
+    resolves cleanly: `FileNotFoundError` (the run directory is gone), `StaleRunError`
+    (a genuine identity mismatch), or `json.JSONDecodeError` / `KeyError` / `TypeError`
+    (its result.json is missing pieces or was never valid JSON, since `read_result`
+    starts indexing and constructing dataclasses from the parsed payload without a
+    generic parse guard). All of these mean the same thing here: this entry cannot be
+    trusted, so its samples are dropped with a warning rather than one bad leftover
+    entry taking the whole report down. An entry whose fingerprint does match but which
+    lacks a "samples" key entirely (a hand-edit, not a `generate.py` write) contributes
+    no samples rather than raising, for the same reason.
     """
     if not generations:
         return {}
@@ -315,7 +326,7 @@ def verified_generations(
         recorded_fingerprint = entry.get("fingerprint") if isinstance(entry, dict) else None
         try:
             result = load_run(run_name, paths)
-        except (StaleRunError, FileNotFoundError):
+        except (StaleRunError, FileNotFoundError, json.JSONDecodeError, KeyError, TypeError):
             logger.warning("%s: no longer a verifiable run, dropping its samples", run_name)
             continue
         if recorded_fingerprint != result.identity.fingerprint:
@@ -326,7 +337,7 @@ def verified_generations(
                 run_name,
             )
             continue
-        verified[run_name] = entry["samples"]
+        verified[run_name] = entry.get("samples", {})
     return verified
 
 

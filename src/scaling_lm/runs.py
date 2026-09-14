@@ -307,12 +307,19 @@ def reject_partial_reuse(
     `resolve_run` already checked that `result` is an exact fingerprint match for
     `run_config`; that identity check does not by itself say whether the saved run
     actually finished its planned passes, only that nothing about the request has
-    changed. This is a second, independent check, on `epochs_completed` against the
-    plan rather than on identity, so a partial result cannot be handed back as if it
-    were the finished run a full request asked for, however it came to be on disk (a
-    genuinely interrupted run, or a result.json placed there by another process). A
-    request that itself caps `max_steps` is not asking for a full run, so it is exempt:
-    reusing a matching capped result under the same cap is the intended resumption path.
+    changed. `max_steps` is itself part of the schedule `run_identity` hashes (it is a
+    normal `TrainingConfig` field), so under the current identity a genuinely
+    interrupted `train_run` cannot produce this state: `write_atomically` never leaves a
+    self-consistent but partial result.json behind, and a capped request's schedule
+    fingerprint differs from an uncapped one's, so `resolve_run` would reject a mismatch
+    on its own before this function is reached. This check exists for what identity
+    alone does not rule out: a result.json placed under this run name by another means
+    (copied from a different results directory, hand-edited, or a future change to what
+    `run_identity` covers), so a partial result is never handed back as if it were the
+    finished run a full request asked for merely because its fingerprint happens to
+    match. A request that itself caps `max_steps` is not asking for a full run, so it is
+    exempt: reusing a matching capped result under the same cap is the intended
+    resumption path for a capped sweep or ablation.
     """
     if run_config.training.max_steps is not None or allow_partial:
         return
