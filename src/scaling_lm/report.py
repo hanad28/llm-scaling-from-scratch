@@ -5,7 +5,9 @@
 Reads the sweep and ablation manifests (which runs to report), generations.json
 (optional) and data/corpus_stats.json, then writes scaling_fit.json, the figures and
 summary.md into the results directory. Every number about a run comes from its verified
-result.json via `runs.load_run`; the manifests contribute run names only.
+result.json via `runs.load_run`; the manifests contribute run names only. Samples in
+generations.json are checked the same way, through `verified_generations`: a run's
+fingerprint has to still match before its samples are shown.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from scaling_lm.config import (
 from scaling_lm.plots import plot_ablation, plot_scaling_law, plot_training_curves
 from scaling_lm.runs import (
     RunResult,
+    StaleRunError,
     describe_passes,
     epochs_summary,
     load_run,
@@ -293,8 +296,42 @@ def ablation_section(ablation: AblationReport | None) -> list[str]:
     return lines
 
 
-def generation_section(generations: Mapping[str, Mapping[str, str]] | None) -> list[str]:
-    if generations is None:
+def verified_generations(
+    generations: Mapping[str, object] | None, paths: ResultsPaths
+) -> dict[str, Mapping[str, str]]:
+    """Samples from generations.json whose recorded fingerprint still matches the run.
+
+    generate.py pairs each run's samples with the fingerprint of the result it loaded the
+    checkpoint from. A run retrained under an unchanged name gets a new fingerprint from
+    `run_identity`; without this check its old samples would keep displaying here as if
+    they came from the current checkpoint. This is the same class of stale-reuse bug
+    `verify_result` guards against for losses, applied to samples: go through `load_run`
+    rather than trusting the run name in generations.json on its own.
+    """
+    if not generations:
+        return {}
+    verified: dict[str, Mapping[str, str]] = {}
+    for run_name, entry in generations.items():
+        recorded_fingerprint = entry.get("fingerprint") if isinstance(entry, dict) else None
+        try:
+            result = load_run(run_name, paths)
+        except (StaleRunError, FileNotFoundError):
+            logger.warning("%s: no longer a verifiable run, dropping its samples", run_name)
+            continue
+        if recorded_fingerprint != result.identity.fingerprint:
+            logger.warning(
+                "%s: generations.json samples do not match the run's current fingerprint "
+                "(retrained since, or an older generations.json); dropping them, rerun "
+                "`python -m scaling_lm.generate`",
+                run_name,
+            )
+            continue
+        verified[run_name] = entry["samples"]
+    return verified
+
+
+def generation_section(generations: Mapping[str, Mapping[str, str]]) -> list[str]:
+    if not generations:
         return ["No samples (run `python -m scaling_lm.generate`)."]
     lines = []
     for run_name, samples in generations.items():
@@ -346,7 +383,7 @@ def build_report(paths: ResultsPaths, title: str) -> PowerLawFit:
     """Fit the power law, draw the figures and write summary.md. Returns the fit."""
     results = [load_run(run_name, paths) for run_name in read_sweep_manifest(paths)]
     ablation = load_ablation(paths)
-    generations = load_json(paths.generations)
+    generations = verified_generations(load_json(paths.generations), paths)
     corpus_stats = load_json(CORPUS_STATS_PATH)
 
     fit = fit_from_results(results)

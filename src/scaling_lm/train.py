@@ -321,13 +321,18 @@ def train_or_load(run_config: RunConfig, paths: ResultsPaths) -> RunResult:
     return existing if existing is not None else train_run(run_config, paths)
 
 
-def load_model(run_name: str, paths: ResultsPaths, device: torch.device) -> GPT:
-    result = load_run(run_name, paths)
+def load_model_from_result(result: RunResult, paths: ResultsPaths, device: torch.device) -> GPT:
+    """Build and load the checkpoint for an already-verified result. See `load_model`."""
     size = MODEL_SIZES_BY_NAME[result.model_size]
     model = GPT(GPTConfig.from_model_size(size, result.positional_scheme))
-    checkpoint_path = paths.run_directory(run_name) / CHECKPOINT_FILENAME
+    checkpoint_path = paths.run_directory(result.run_name) / CHECKPOINT_FILENAME
     model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
     return model.to(device).eval()
+
+
+def load_model(run_name: str, paths: ResultsPaths, device: torch.device) -> GPT:
+    """Load a finished run's checkpoint by name, verifying it first through `load_run`."""
+    return load_model_from_result(load_run(run_name, paths), paths, device)
 
 
 def add_training_arguments(parser: argparse.ArgumentParser) -> None:

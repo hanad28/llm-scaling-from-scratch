@@ -7,13 +7,14 @@ from dataclasses import replace
 import numpy as np
 import pytest
 from conftest import STUB_CORPUS_FINGERPRINT
-from test_runs import make_result
+from test_runs import make_result, write_result
 
 from scaling_lm import runs as runs_module
 from scaling_lm.ablation import AblationManifest, analyse_ablation
 from scaling_lm.config import (
     ABLATION_POSITIONAL_SCHEMES,
     DEFAULT_POSITIONAL_SCHEME,
+    ResultsPaths,
     RunConfig,
     TrainingConfig,
 )
@@ -24,6 +25,7 @@ from scaling_lm.report import (
     seed_spread_of_sweep_scheme,
     seed_variance_section,
     sweep_section,
+    verified_generations,
 )
 from scaling_lm.runs import RunResult
 from scaling_lm.scaling_fit import alpha_std_from_loss_noise, fit_power_law
@@ -188,3 +190,51 @@ def test_training_curve_labels_and_title_show_when_max_steps_cut_a_run_short():
     assert "max_steps" in title
     assert "1 to 4 passes" not in title
     assert "single" not in training_curves_title([results[-1]])
+
+
+def test_verified_generations_keeps_samples_matching_the_current_run(tmp_path):
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", DEFAULT_POSITIONAL_SCHEME, 0, TrainingConfig(max_steps=4))
+    result = make_result(run_config)
+    write_result(result, paths)
+    generations = {
+        run_config.run_name: {
+            "fingerprint": result.identity.fingerprint,
+            "samples": {"prompt": "a continuation"},
+        }
+    }
+    assert verified_generations(generations, paths) == {
+        run_config.run_name: {"prompt": "a continuation"}
+    }
+
+
+def test_verified_generations_drops_samples_after_a_config_change_same_size_name(tmp_path):
+    """Fail-then-pass proof: samples generated under one config must not survive display
+
+    once the same run name is retrained under a changed config (`verified_generations`
+    did not exist before this fix; generation_section trusted generations.json outright).
+    """
+    paths = ResultsPaths(tmp_path)
+    original = RunConfig("tiny", DEFAULT_POSITIONAL_SCHEME, 0, TrainingConfig(max_steps=4))
+    original_fingerprint = make_result(original).identity.fingerprint
+    stale_samples = {"fingerprint": original_fingerprint, "samples": {"p": "old"}}
+    generations = {original.run_name: stale_samples}
+
+    # Retrain the same run name under a changed config: same size, different max_steps.
+    changed = RunConfig("tiny", DEFAULT_POSITIONAL_SCHEME, 0, TrainingConfig(max_steps=8))
+    assert changed.run_name == original.run_name
+    write_result(make_result(changed), paths)
+
+    assert verified_generations(generations, paths) == {}
+
+
+def test_verified_generations_drops_samples_for_a_run_that_no_longer_verifies(tmp_path):
+    paths = ResultsPaths(tmp_path)
+    run_config = RunConfig("tiny", DEFAULT_POSITIONAL_SCHEME, 0, TrainingConfig(max_steps=4))
+    generations = {run_config.run_name: {"fingerprint": "stale", "samples": {"p": "old"}}}
+    # No result.json on disk at all: load_run fails, not just a fingerprint mismatch.
+    assert verified_generations(generations, paths) == {}
+
+
+def test_verified_generations_handles_no_generations_file():
+    assert verified_generations(None, ResultsPaths()) == {}
